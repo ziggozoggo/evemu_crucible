@@ -135,7 +135,7 @@ public:
     void SendSpecialEffect10(uint32 entityID, uint32 targetID, std::string guid, bool isOffensive, bool start, bool isActive) const;
     void SendSpecialEffect(uint32 entityID, uint32 moduleID, uint32 moduleTypeID, uint32 targetID, uint32 chargeTypeID, std::string guid, bool isOffensive, bool start, bool isActive, int32 duration, uint32 repeat, int32 graphicInfo = 0) const;
 
-    int32 GetDistance()                                 { return static_cast<int32>(m_stopDistance); }
+    int32 GetDistance()                                 { return m_stopDistance; }
     int32 GetWarpSpeed()                                { return static_cast<int32>(m_shipWarpSpeed * 10); }
     uint32 GetTargetID()                                { return m_targetEntity.first; }
     SystemEntity* GetTargetEntity()                     { return m_targetEntity.second; }
@@ -225,7 +225,7 @@ protected:
 
     uint8 m_ballMode;
 
-    double m_stopDistance;
+    int32 m_stopDistance;
 
     uint8 m_turnTic;
     int16 m_orbiting;

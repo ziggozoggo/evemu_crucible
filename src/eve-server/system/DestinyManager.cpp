@@ -1326,19 +1326,6 @@ void DestinyManager::InitWarp() {
 void DestinyManager::WarpAccel(uint16 sec_into_warp) {
     double currentDistance = exp(3 * sec_into_warp);
 
-    if (mySE->SysBubble() != nullptr && currentDistance > BUBBLE_RADIUS_METERS && mySE->SysBubble() != m_targBubble) {
-        if (is_log_enabled(DESTINY__WARP_TRACE)) {
-            _log(
-                DESTINY__WARP_TRACE,
-                "Destiny::WarpAccel(): %s(%u) is being removed from bubble %u.",
-                mySE->GetName(),
-                mySE->GetID(),
-                mySE->SysBubble()->GetID()
-            );
-        }
-        mySE->SysBubble()->Remove(mySE);
-    }
-
     if (currentDistance > m_warpState->accelDist) {
         currentDistance = m_warpState->accelDist;
         m_warpState->accel = false;
@@ -1410,6 +1397,18 @@ void DestinyManager::WarpUpdate(double currentShipSpeed) {
     m_velocity = (m_warpState->warp_vector * currentShipSpeed);
     SetPosition(m_targetPoint - (m_warpState->warp_vector * m_targetDistance));
 
+    bool inTargetBubble = m_targBubble->InBubble(m_position, true);
+    SystemBubble* destinationBubble = m_targBubble;
+    if (!inTargetBubble)
+        destinationBubble = sBubbleMgr.GetBubble(mySE->SystemMgr(), m_position);
+
+    SystemBubble* currentBubble = mySE->SysBubble();
+    if (currentBubble != destinationBubble) {
+        if (currentBubble != nullptr)
+            currentBubble->Remove(mySE);
+        destinationBubble->Add(mySE);
+    }
+
     if (is_log_enabled(DESTINY__WARP_TRACE)) {
         _log(
             DESTINY__WARP_TRACE,
@@ -1421,11 +1420,11 @@ void DestinyManager::WarpUpdate(double currentShipSpeed) {
         );
     }
 
-    if (m_targBubble->InBubble(m_position, true)) {
+    if (inTargetBubble) {
         if (is_log_enabled(DESTINY__WARP_TRACE)) {
             _log(
                 DESTINY__WARP_TRACE,
-                "Destiny::WarpUpdate()  %s(%u): Ship at %.2f,%.2f,%.2f is calling Add() for bubble %u.",
+                "Destiny::WarpUpdate()  %s(%u): Ship at %.2f,%.2f,%.2f is in target bubble %u.",
                 mySE->GetName(),
                 mySE->GetID(),
                 m_position.x,
@@ -1434,21 +1433,21 @@ void DestinyManager::WarpUpdate(double currentShipSpeed) {
                 m_targBubble->GetID()
             );
         }
-        m_targBubble->Add(mySE);
         SetPosition(m_position, true);
     } else {
         _log(
             DESTINY__WARP_TRACE,
-            "Destiny::WarpUpdate()  %s(%u): adding to midWarpSystemBubble.",
+            "Destiny::WarpUpdate()  %s(%u): Ship is in mid-warp bubble %u.",
             mySE->GetName(),
-            mySE->GetID()
+            mySE->GetID(),
+            destinationBubble->GetID()
         );
-        SystemBubble* midWarpSystemBubble(sBubbleMgr.GetBubble(mySE->SystemMgr(), m_position));
-        midWarpSystemBubble->Add(mySE);
     }
 }
 
 void DestinyManager::WarpStop(double currentShipSpeed) {
+    const GPoint finalPosition(m_position);
+
     if (is_log_enabled(DESTINY__WARP_TRACE)) {
         _log(DESTINY__WARP_TRACE, "Destiny::WarpStop(): %s(%u) - Warp complete. Exit velocity %.4f m/s with %.2f m left to go.", \
                 mySE->GetName(), mySE->GetID(), currentShipSpeed, m_targetDistance);
@@ -1468,6 +1467,24 @@ void DestinyManager::WarpStop(double currentShipSpeed) {
         mySE->GetNPCSE()->GetAIMgr()->WarpOutComplete();
     }
     Halt();
+
+    std::vector<PyTuple*> updates;
+    CmdStop stop;
+        stop.entityID = mySE->GetID();
+    updates.push_back(stop.Encode());
+    SetBallVelocity velocity;
+        velocity.entityID = mySE->GetID();
+        velocity.x = 0.0;
+        velocity.y = 0.0;
+        velocity.z = 0.0;
+    updates.push_back(velocity.Encode());
+    SetBallPosition position;
+        position.entityID = mySE->GetID();
+        position.x = finalPosition.x;
+        position.y = finalPosition.y;
+        position.z = finalPosition.z;
+    updates.push_back(position.Encode());
+    SendDestinyUpdate(updates);
 }
 
 void DestinyManager::EntityRemoved(SystemEntity *pSE) {
