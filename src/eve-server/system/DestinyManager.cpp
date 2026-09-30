@@ -1710,38 +1710,41 @@ void DestinyManager::WarpTo(const GPoint& where, int32 distance, bool autoPilot,
 
         Client *pClient = mySE->GetPilot();
 
-        double currentShipCap = pClient->GetShip()->GetAttribute(AttrCapacitorCharge).get_float();
-        double capNeeded = m_mass * m_warpCapacitorNeed * (static_cast<double>(m_targetDistance) / static_cast<double>(ONE_AU_IN_METERS));
-        capNeeded *= (1.0 - (0.1 *pClient->GetChar()->GetSkillLevel(EvESkill::WarpDriveOperation)));
+        const double currentShipCap = pClient->GetShip()->GetAttribute(AttrCapacitorCharge).get_float();
+        const double warpCapMultiplier = 1.0 - (0.1 * pClient->GetChar()->GetSkillLevel(EvESkill::WarpDriveOperation));
+        const double capacitorPerAu = m_mass * m_warpCapacitorNeed * warpCapMultiplier;
+        const double requiredCapacitor = capacitorPerAu * (m_targetDistance / static_cast<double>(ONE_AU_IN_METERS));
+        double capacitorAfterWarp = currentShipCap - requiredCapacitor;
 
-        _log(DESTINY__WARNING, "Warp Cap need for %s(%u) is %.4f", mySE->GetName(), mySE->GetID(), capNeeded);
+        _log(DESTINY__WARNING, "Warp Cap need for %s(%u) is %.4f; current=%.4f; distance=%.4f AU",
+             mySE->GetName(), mySE->GetID(), requiredCapacitor, currentShipCap, m_targetDistance / static_cast<double>(ONE_AU_IN_METERS));
 
-        if (capNeeded > currentShipCap) {
-            capNeeded = (currentShipCap /m_warpCapacitorNeed) /m_mass;
-            if (capNeeded > 1) {
-                m_targetDistance = static_cast<double>(capNeeded) * static_cast<double>(ONE_AU_IN_METERS);
-                GVector warp_direction(m_position, where);
-                GPoint newTarget(m_position + (warp_direction * m_targetDistance));
+        if (requiredCapacitor > currentShipCap) {
+            const double reachableDistanceAu = currentShipCap / capacitorPerAu;
+            if (reachableDistanceAu > 1.0) {
+                m_targetDistance = reachableDistanceAu * static_cast<double>(ONE_AU_IN_METERS);
+                GVector warp_direction(m_position, m_targetPoint);
+                warp_direction.normalize();
+                m_targetPoint = m_position + (warp_direction * m_targetDistance);
 
-                m_targBubble = sBubbleMgr.GetBubble(mySE->SystemMgr(), newTarget);
+                m_targBubble = sBubbleMgr.GetBubble(mySE->SystemMgr(), m_targetPoint);
                 if (is_log_enabled(DESTINY__WARP_TRACE))
                     _log(DESTINY__TRACE, "Destiny::WarpTo():Update - %s(%u) target bubble: %u  m_stopDistance: %i  m_targetDistance: %.2f",
                         mySE->GetName(), mySE->GetID(), m_targBubble->GetID(), m_stopDistance, m_targetDistance);
+                capacitorAfterWarp = 0.0;
             } else {
                 pClient->SendErrorMsg("You don't have enough capacitor charge to warp.");
                 _log(DESTINY__WARNING, "Destiny::WarpTo() - %s(%u): Capacitor needed vs current  %.3f / %.3f",
-                        mySE->GetName(), mySE->GetID(), capNeeded, currentShipCap);
+                        mySE->GetName(), mySE->GetID(), requiredCapacitor, currentShipCap);
 
                 m_ballMode = Destiny::Ball::Mode::STOP;
                 m_targBubble = nullptr;
                 SafeDelete(m_warpState);
                 return;
             }
-        } else {
-            capNeeded = currentShipCap - capNeeded;
         }
 
-        m_capNeeded = capNeeded;
+        m_capNeeded = capacitorAfterWarp;
     }
 
     if (m_targBubble->HasWarpBubble()) {
