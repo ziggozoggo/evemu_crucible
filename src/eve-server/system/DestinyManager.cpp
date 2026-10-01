@@ -83,8 +83,6 @@ m_shipWarpSpeed(1.0),
 m_maxShipSpeed(100.0),
 m_shipAgility(1.0),
 m_shipInertia(1.0),
-m_warpAccelTime(1),
-m_warpDecelTime(1),
 m_warpState(nullptr),
 m_targBubble(nullptr),
 m_warpCapacitorNeed(0.00001),
@@ -403,14 +401,6 @@ void DestinyManager::SetSpeedFraction(double fraction, bool startMovement) {
     // Устанавливаем целевую скорость
     m_targetSpeed = fraction * m_maxShipSpeed;
     
-    // Если корабль стоит и мы даём команду на движение
-    if (m_activeSpeedFraction < 0.001 && fraction > 0.001) {
-        m_speedAtChange = 0.0;
-        m_speedChangeTime = GetTimeMSeconds();
-        m_timeSinceChange = 0.0;
-        m_activeSpeedFraction = fraction;
-    }
-
     if (m_activeSpeedFraction > 0.01) {
         m_userSpeedFraction = fraction;
         m_prevSpeedFraction = m_activeSpeedFraction;
@@ -729,7 +719,7 @@ void DestinyManager::MoveObject() {
     double dt = (currentTime - m_speedChangeTime) * 0.001;
     if (dt < 0) dt = 0;
     
-    m_timeSinceChange += dt;
+    m_timeSinceChange = dt;
     if (m_timeSinceChange > 60.0) m_timeSinceChange = 60.0;
     
     double currentSpeed = 0.0;
@@ -1198,36 +1188,29 @@ void DestinyManager::InitWarp() {
         );
     }
 
-    double warpSpeedInMeters(static_cast<double>(m_shipWarpSpeed) * static_cast<double>(ONE_AU_IN_METERS));
+    const double maxWarpSpeed = std::max(1.0, m_shipWarpSpeed * static_cast<double>(ONE_AU_IN_METERS));
+    const double totalDistance = std::abs(m_targetDistance);
+    const double peakWarpSpeed = std::min(maxWarpSpeed, totalDistance * 0.75);
+    const double accelDistance = peakWarpSpeed / 3.0;
+    const double decelDistance = peakWarpSpeed;
+    const double cruiseDistance = std::max(0.0, totalDistance - accelDistance - decelDistance);
+    const double accelTime = std::log(std::max(1.0, accelDistance)) / 3.0;
+    const double cruiseTime = cruiseDistance / peakWarpSpeed;
+    const double exitSpeed = std::max(1.0, m_speedToLeaveWarp);
+    const double decelTime = std::max(0.0, std::log(peakWarpSpeed / exitSpeed));
+    const double warpTime = accelTime + cruiseTime + decelTime;
 
-    bool cruise(true);
-    double cruiseTime(0.0);
-    double accelDistance(0.0), decelDistance(0.0), cruiseDistance(0.0);
-    if (abs(static_cast<double>(m_targetDistance)) < warpSpeedInMeters) {
+    if (cruiseDistance == 0.0) {
         _log(
             DESTINY__WARP_TRACE,
             "short warp distance dictates that warp cruise time is unnecessary"
         );
-        cruise = false;
-        accelDistance = (static_cast<double>(m_targetDistance) / static_cast<double>(3));
-        decelDistance = (static_cast<double>(m_targetDistance) - accelDistance);
-        warpSpeedInMeters = accelDistance;
-        m_warpDecelTime = log(decelDistance / static_cast<double>(3));
-        m_warpAccelTime = log(accelDistance / static_cast<double>(3)) / static_cast<double>(3);
     } else {
         _log(
             DESTINY__WARP_TRACE,
             "longer warp distance dictates that warp cruise time is is warranted"
         );
-        m_warpAccelTime = 7;
-        m_warpDecelTime = 21;
-        decelDistance = exp(static_cast<double>(m_warpDecelTime));
-        accelDistance = exp(static_cast<double>(3) * static_cast<double>(m_warpAccelTime));
-        cruiseDistance = (static_cast<double>(m_targetDistance) - accelDistance - decelDistance);
-        cruiseTime = static_cast<double>(cruiseDistance / warpSpeedInMeters);
     }
-
-    double warpTime(static_cast<double>(m_warpAccelTime) + static_cast<double>(m_warpDecelTime) + std::floor(cruiseTime));
 
     GVector warp_vector(m_position, m_targetPoint);
     warp_vector.normalize();
@@ -1235,14 +1218,14 @@ void DestinyManager::InitWarp() {
     if (is_log_enabled(DESTINY__WARP_TRACE)) {
         _log(
             DESTINY__WARP_TRACE,
-            "Destiny::InitWarp():Calculate - %s(%u): Warp will accelerate for %us, cruise for %.3f, then decelerate for %us, with total time of %.3fs, and warp speed of %.4f m/s.",
+            "Destiny::InitWarp():Calculate - %s(%u): Warp will accelerate for %.3fs, cruise for %.3fs, then decelerate for %.3fs, with total time of %.3fs, and peak warp speed of %.4f m/s.",
             mySE->GetName(),
             mySE->GetID(),
-            m_warpAccelTime,
+            accelTime,
             cruiseTime,
-            m_warpDecelTime,
+            decelTime,
             warpTime,
-            warpSpeedInMeters
+            peakWarpSpeed
         );
 
         _log(
@@ -1293,18 +1276,20 @@ void DestinyManager::InitWarp() {
         );
     }
 
-    m_warpDecelTime = m_warpAccelTime + floor(cruiseTime);
     m_stateStamp = sEntityList.GetStamp();
 
     SafeDelete(m_warpState);
 
     m_warpState = new WarpState(
         m_stateStamp,
-        m_targetDistance,
-        warpSpeedInMeters,
+        totalDistance,
+        peakWarpSpeed,
         accelDistance,
         cruiseDistance,
         decelDistance,
+        accelTime,
+        cruiseTime,
+        decelTime,
         warpTime,
         true,
         false,
@@ -1324,22 +1309,24 @@ void DestinyManager::InitWarp() {
 }
 
 void DestinyManager::WarpAccel(uint16 sec_into_warp) {
-    double currentDistance = exp(3 * sec_into_warp);
-
-    if (currentDistance > m_warpState->accelDist) {
-        currentDistance = m_warpState->accelDist;
+    const double elapsed = static_cast<double>(sec_into_warp);
+    if (elapsed >= m_warpState->accelTime) {
         m_warpState->accel = false;
-        if (m_warpState->cruiseDist > 0) {
+        if (m_warpState->cruiseTime > 0.0) {
             m_warpState->cruise = true;
+            WarpCruise(sec_into_warp);
         } else {
             m_warpState->decel = true;
+            WarpDecel(sec_into_warp);
         }
+        return;
     }
 
-    m_targetDistance -= currentDistance;
-    double currentShipSpeed = (3 * currentDistance);
+    const double distanceTraveled = std::min(std::exp(3.0 * elapsed), m_warpState->accelDist);
+    m_targetDistance = m_warpState->total_distance - distanceTraveled;
+    const double currentShipSpeed = std::min(3.0 * distanceTraveled, m_warpState->peakWarpSpeed);
 
-    if (is_log_enabled(DESTINY__WARP_TRACE) && m_warpState->accel) {
+    if (is_log_enabled(DESTINY__WARP_TRACE)) {
         _log(
             DESTINY__WARP_TRACE,
             "Destiny::WarpAccel(): %s(%u) - Warp Accelerating(%us): velocity %.4f m/s with %.2f m left to go. Current distance %.4f from origin.",
@@ -1348,7 +1335,7 @@ void DestinyManager::WarpAccel(uint16 sec_into_warp) {
             sec_into_warp,
             currentShipSpeed,
             m_targetDistance,
-            currentDistance
+            distanceTraveled
         );
     }
 
@@ -1356,12 +1343,17 @@ void DestinyManager::WarpAccel(uint16 sec_into_warp) {
 }
 
 void DestinyManager::WarpCruise(uint16 sec_into_warp) {
-    m_targetDistance -= m_warpState->warpSpeed;
-
-    if ((m_targetDistance - m_warpState->warpSpeed) < m_warpState->decelDist) {
+    const double phaseTime = static_cast<double>(sec_into_warp) - m_warpState->accelTime;
+    if (phaseTime >= m_warpState->cruiseTime) {
         m_warpState->cruise = false;
         m_warpState->decel = true;
+        WarpDecel(sec_into_warp);
+        return;
     }
+
+    const double distanceTraveled = m_warpState->accelDist
+        + (m_warpState->peakWarpSpeed * std::max(0.0, phaseTime));
+    m_targetDistance = m_warpState->total_distance - distanceTraveled;
 
     if (is_log_enabled(DESTINY__WARP_TRACE)) {
         _log(
@@ -1370,26 +1362,29 @@ void DestinyManager::WarpCruise(uint16 sec_into_warp) {
             mySE->GetName(),
             mySE->GetID(),
             sec_into_warp,
-            m_warpState->warpSpeed,
+            m_warpState->peakWarpSpeed,
             m_targetDistance
         );
     }
 
-    WarpUpdate(m_warpState->warpSpeed);
+    WarpUpdate(m_warpState->peakWarpSpeed);
 }
 
 void DestinyManager::WarpDecel(uint16 sec_into_warp) {
-    uint8 decelTime = (sec_into_warp - m_warpDecelTime);
-    double currentDistance = (m_warpState->total_distance - (exp(-decelTime) * m_warpState->decelDist));
-    m_targetDistance = static_cast<double>(m_warpState->total_distance - currentDistance);
-    double currentShipSpeed = (m_warpState->warpSpeed * exp(-decelTime));
+    const double phaseTime = std::max(
+        0.0,
+        static_cast<double>(sec_into_warp) - m_warpState->accelTime - m_warpState->cruiseTime
+    );
+    const double decay = std::exp(-phaseTime);
+    m_targetDistance = m_warpState->decelDist * decay;
+    const double currentShipSpeed = m_warpState->peakWarpSpeed * decay;
 
     if (is_log_enabled(DESTINY__WARP_TRACE))
-        _log(DESTINY__WARP_TRACE, "Destiny::WarpDecel(): %s(%u) - Warp Decelerating(%us/%us): velocity %.4f m/s with %.2f m left to go.", \
-                mySE->GetName(), mySE->GetID(), decelTime, sec_into_warp, currentShipSpeed, m_targetDistance);
+        _log(DESTINY__WARP_TRACE, "Destiny::WarpDecel(): %s(%u) - Warp Decelerating(%.3fs/%us): velocity %.4f m/s with %.2f m left to go.", \
+                mySE->GetName(), mySE->GetID(), phaseTime, sec_into_warp, currentShipSpeed, m_targetDistance);
 
     WarpUpdate(currentShipSpeed);
-    if (currentShipSpeed <= m_speedToLeaveWarp)
+    if ((phaseTime >= m_warpState->decelTime) or (currentShipSpeed <= m_speedToLeaveWarp))
         WarpStop(currentShipSpeed);
 }
 
@@ -1446,8 +1441,6 @@ void DestinyManager::WarpUpdate(double currentShipSpeed) {
 }
 
 void DestinyManager::WarpStop(double currentShipSpeed) {
-    const GPoint finalPosition(m_position);
-
     if (is_log_enabled(DESTINY__WARP_TRACE)) {
         _log(DESTINY__WARP_TRACE, "Destiny::WarpStop(): %s(%u) - Warp complete. Exit velocity %.4f m/s with %.2f m left to go.", \
                 mySE->GetName(), mySE->GetID(), currentShipSpeed, m_targetDistance);
@@ -1478,12 +1471,6 @@ void DestinyManager::WarpStop(double currentShipSpeed) {
         velocity.y = 0.0;
         velocity.z = 0.0;
     updates.push_back(velocity.Encode());
-    SetBallPosition position;
-        position.entityID = mySE->GetID();
-        position.x = finalPosition.x;
-        position.y = finalPosition.y;
-        position.z = finalPosition.z;
-    updates.push_back(position.Encode());
     SendDestinyUpdate(updates);
 }
 
@@ -1666,6 +1653,10 @@ void DestinyManager::GotoPoint(const GPoint& point) {
 void DestinyManager::WarpTo(const GPoint& where, int32 distance, bool autoPilot, SystemEntity* pSE) {
     SafeDelete(m_warpState);
 
+    // The client applies CmdWarpTo.distance to the transmitted target.  Keep
+    // that target unshifted while m_targetPoint stores the server endpoint.
+    GPoint warpCommandTarget(where);
+
     if (autoPilot) {
         Follow(pSE, distance);
     } else {
@@ -1694,9 +1685,9 @@ void DestinyManager::WarpTo(const GPoint& where, int32 distance, bool autoPilot,
         std::vector<PyTuple*> updates;
         CmdWarpTo wt;
             wt.entityID = mySE->GetID();
-            wt.dest_x = m_targetPoint.x;
-            wt.dest_y = m_targetPoint.y;
-            wt.dest_z = m_targetPoint.z;
+            wt.dest_x = warpCommandTarget.x;
+            wt.dest_y = warpCommandTarget.y;
+            wt.dest_z = warpCommandTarget.z;
             wt.distance = m_stopDistance;
             wt.warpSpeed = GetWarpSpeed();
         updates.push_back(wt.Encode());
@@ -1743,6 +1734,7 @@ void DestinyManager::WarpTo(const GPoint& where, int32 distance, bool autoPilot,
                 GVector warp_direction(m_position, m_targetPoint);
                 warp_direction.normalize();
                 m_targetPoint = m_position + (warp_direction * m_targetDistance);
+                warpCommandTarget = m_targetPoint + (warp_direction * m_stopDistance);
 
                 m_targBubble = sBubbleMgr.GetBubble(mySE->SystemMgr(), m_targetPoint);
                 if (is_log_enabled(DESTINY__WARP_TRACE))
@@ -1775,9 +1767,9 @@ void DestinyManager::WarpTo(const GPoint& where, int32 distance, bool autoPilot,
 
     CmdWarpTo wt;
     wt.entityID = mySE->GetID();
-    wt.dest_x = m_targetPoint.x;
-    wt.dest_y = m_targetPoint.y;
-    wt.dest_z = m_targetPoint.z;
+    wt.dest_x = warpCommandTarget.x;
+    wt.dest_y = warpCommandTarget.y;
+    wt.dest_z = warpCommandTarget.z;
     wt.distance = m_stopDistance;
     wt.warpSpeed = GetWarpSpeed();
 

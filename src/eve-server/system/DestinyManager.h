@@ -28,11 +28,11 @@ namespace Destiny {
         namespace Orbit {
             enum {
                 None = 0,
-                TooFar = 1,
-                TooClose = 2,
+                Orbiting = 1,
+                Close = 2,
                 Far = 3,
-                Close = 4,
-                Orbiting = 5
+                TooClose = 4,
+                TooFar = 5
             };
         }
     }
@@ -186,9 +186,6 @@ protected:
 
     bool m_hasSentShipUpdates;
 
-    uint8 m_warpAccelTime;
-    uint8 m_warpDecelTime;
-
     double m_mass;
     double m_massMKg;
     double m_alignTime;
@@ -315,10 +312,13 @@ private:
         WarpState(
             uint32 start_time_,
             double total_distance_,
-            double warp_speed_,
+            double peak_warp_speed_,
             double accel_dist_,
             double cruise_dist_,
             double decel_dist_,
+            double accel_time_,
+            double cruise_time_,
+            double decel_time_,
             double warp_time_,
             bool accel_,
             bool cruise_,
@@ -326,10 +326,13 @@ private:
             const GVector &warp_vector_)
         : start_time(start_time_),
         total_distance(total_distance_),
-        warpSpeed(warp_speed_),
+        peakWarpSpeed(peak_warp_speed_),
         accelDist(accel_dist_),
         cruiseDist(cruise_dist_),
         decelDist(decel_dist_),
+        accelTime(accel_time_),
+        cruiseTime(cruise_time_),
+        decelTime(decel_time_),
         warpTime(warp_time_),
         accel(accel_),
         cruise(cruise_),
@@ -338,10 +341,13 @@ private:
         {}
         uint32 start_time;
         double total_distance;
-        double warpSpeed;
+        double peakWarpSpeed;
         double accelDist;
         double cruiseDist;
         double decelDist;
+        double accelTime;
+        double cruiseTime;
+        double decelTime;
         double warpTime;
         bool accel;
         bool cruise;
