@@ -1465,12 +1465,8 @@ void DestinyManager::WarpStop(double currentShipSpeed) {
     CmdStop stop;
         stop.entityID = mySE->GetID();
     updates.push_back(stop.Encode());
-    SetBallVelocity velocity;
-        velocity.entityID = mySE->GetID();
-        velocity.x = 0.0;
-        velocity.y = 0.0;
-        velocity.z = 0.0;
-    updates.push_back(velocity.Encode());
+    // Stop client movement without replacing its last non-zero velocity vector,
+    // which the client retains as the ship's visual heading.
     SendDestinyUpdate(updates);
 }
 
