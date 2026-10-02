@@ -16,8 +16,10 @@
       <stringInline value="SalvagingFailure" />
       <dictInline>
         <dictInlineEntry key="type">
-          <int name="unk_1" />
-          <int name="wreckTypeID" />
+          <tupleInline>
+            <int name="unk_1" />
+            <int name="wreckTypeID" />
+          </tupleInline>
         </dictInlineEntry>
       </dictInline>
     </tupleInline>
@@ -28,8 +30,10 @@
       <stringInline value="SalvagingSuccess" />
       <dictInline>
         <dictInlineEntry key="type">
-          <int name="unk_1" />
-          <int name="wreckTypeID" />
+          <tupleInline>
+            <int name="unk_1" />
+            <int name="wreckTypeID" />
+          </tupleInline>
         </dictInlineEntry>
       </dictInline>
     </tupleInline>
