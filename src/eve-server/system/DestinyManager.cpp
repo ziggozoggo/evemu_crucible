@@ -46,6 +46,8 @@
 #include "system/DestinyManager.h"
 #include "system/SystemBubble.h"
 #include "system/SystemManager.h"
+#include <algorithm>
+#include <cmath>
 #include <cstdlib>
 
 // ===== КОНСТАНТЫ ФИЗИКИ ИЗ ОФИЦИАЛЬНОГО КОДА =====
@@ -62,6 +64,25 @@
 // Минимальная угловая скорость
 #define MIN_ANGULAR_VELOCITY 0.01f
 // ===== КОНЕЦ КОНСТАНТ =====
+
+namespace {
+    constexpr double DIRECTION_EPSILON = 1e-12;
+
+    bool NormalizeDirection(GVector& direction) {
+        const double length = std::hypot(direction.x, direction.y, direction.z);
+        if (!std::isfinite(length) or (length <= DIRECTION_EPSILON))
+            return false;
+
+        direction.x /= length;
+        direction.y /= length;
+        direction.z /= length;
+        return true;
+    }
+
+    double ClampedDirectionDot(const GVector& first, const GVector& second) {
+        return std::clamp(first.dotProduct(second), -1.0, 1.0);
+    }
+}
 
 DestinyManager::DestinyManager(SystemEntity *self)
 : mySE(self),
@@ -244,8 +265,12 @@ void DestinyManager::ProcessState() {
             }
 
             GVector toVec(m_position, m_targetPoint);
-            toVec.normalize();
-            double dot = toVec.dotProduct(m_shipHeading);
+            if (!NormalizeDirection(toVec))
+                toVec = GVector(NULL_ORIGIN);
+            if (!NormalizeDirection(m_shipHeading))
+                m_shipHeading = toVec;
+
+            const double dot = ClampedDirectionDot(toVec, m_shipHeading);
             double degrees = EvE::Trig::Rad2Deg(std::acos(dot));
 
             if ((degrees < WARP_ALIGNMENT) and (m_timeFraction > 0.749)) {
@@ -704,7 +729,7 @@ void DestinyManager::CheckBump()
 {
     double profileStartTime(GetTimeUSeconds());
 
-    /  collision detection code here
+    //  collision detection code here
     /*  in this case, we are ONLY interested in objects
      *   that have drifted within each others radius (for whatever reason)
      *  this only checks for ships running sub-warp speeds
@@ -957,7 +982,7 @@ void DestinyManager::MoveObject() {
 }
 // ===== КОНЕЦ НОВОЙ ВЕРСИИ =====
 
-bool DestinyManager::IsTurn() { //this is working.  dont change
+bool DestinyManager::IsTurn() {
     if (m_targetPoint.isZero()) {
         _log(DESTINY__ERROR, "Destiny::IsTurn() - %s(%u): TargetPoint is null.", mySE->GetName(), mySE->GetID());
         if (mySE->HasPilot())
@@ -966,40 +991,27 @@ bool DestinyManager::IsTurn() { //this is working.  dont change
         Halt();
         return false;
     }
+    // Compare normalized current and target directions.  Clamp their dot
+    // product to absorb floating-point error before calling acos().
+    GVector toVec(m_position, m_targetPoint);
+    if (!NormalizeDirection(toVec))
+        toVec = GVector(NULL_ORIGIN);
+
     // if ship is stopped, there is no turn.  immediately begin movement in desired direction
     if ((m_timeFraction < 0.1) and (m_activeSpeedFraction < 0.1)) {
-        GVector toVec(m_position, m_targetPoint);
-        toVec.normalize();
         m_shipHeading = toVec;
         return false;
     }
 
-
-    // check for turning angle.  returns true if angle is enough to change movement variables
-    // create isosceles triangle where legs are current direction and destination, then find angle between legs
-    //  it will set m_radians in the range of [-pi,pi].
-    /** @todo revisit this to verify angle calcs */
-
-    GVector toVec(m_position, m_targetPoint);
-    toVec.normalize();
-    double dot(toVec.dotProduct(m_shipHeading));
-    if ((dot > 1.0) or (dot < -1.0)) {
-        sLog.Error("Destiny::IsTurn()", "%s(%u) - shipHeading has screwed up.  dot is %.5f", mySE->GetName(), mySE->GetID(), dot);
-        _log(DESTINY__ERROR, "Destiny::IsTurn() m_shipHeading: %.3f,%.3f,%.3f.  m_targetHeading: %.3f,%.3f,%.3f, toVec:%.3f,%.3f,%.3f", \
-                m_shipHeading.x, m_shipHeading.y, m_shipHeading.z, m_targetHeading.x, m_targetHeading.y, m_targetHeading.z, toVec.x, toVec.y, toVec.z);
-             // try to correct for bad heading vector and retest...
-             if (m_shipHeading.x > 1.0)  { m_shipHeading.x -= 1; }
-        else if (m_shipHeading.x < 1.0)  { m_shipHeading.x += 1; }
-             if (m_shipHeading.y > 1.0)  { m_shipHeading.y -= 1; }
-        else if (m_shipHeading.y < 1.0)  { m_shipHeading.y += 1; }
-             if (m_shipHeading.z > 1.0)  { m_shipHeading.z -= 1; }
-        else if (m_shipHeading.z < 1.0)  { m_shipHeading.z += 1; }
-        dot = toVec.dotProduct(m_shipHeading);
-        if ((dot > 1.0) or (dot < -1.0)) {
-            sLog.Error("Destiny::IsTurn()", "%s(%u) - shipHeading has screwed up AGAIN.  dot is %.5f", mySE->GetName(), mySE->GetID(), dot);
-            return false;
-        }
+    if (!NormalizeDirection(m_shipHeading)) {
+        sLog.Error("Destiny::IsTurn()", "%s(%u) - invalid ship heading; resetting to target heading.",
+            mySE->GetName(), mySE->GetID());
+        m_shipHeading = toVec;
+        m_radians = 0.0;
+        return false;
     }
+
+    const double dot = ClampedDirectionDot(toVec, m_shipHeading);
     m_radians = std::acos(dot);
     double degrees(EvE::Trig::Rad2Deg(m_radians));
     if (degrees < TURN_ALIGNMENT) {
@@ -1014,36 +1026,6 @@ bool DestinyManager::IsTurn() { //this is working.  dont change
     }
     return true;
 }
-
-/* Quaternion slerp(Quaternion const &v0, Quaternion const &v1, double t) {
- *   // v0 and v1 should be unit length or else something broken will happen.
- *
- *   // Compute the cosine of the angle between the two vectors.
- *   double dot = dot_product(v0, v1);
- *
- *   const double DOT_THRESHOLD = 0.9995;
- *   if (dot > DOT_THRESHOLD) {
- *       // If the inputs are too close for comfort, linearly interpolate
- *       // and normalize the result.
- *
- *       Quaternion result = v0 + t*(v1 – v0);
- *       result.normalize();
- *       return result;
- *   }
- *
- *   Clamp(dot, -1, 1);           // Robustness: Stay within domain of acos()
- *   double theta_0 = acos(dot);  // theta_0 = angle between input vectors
- *   double theta = theta_0*t;    // theta = angle between v0 and result
- *
- *   Quaternion v2 = v1 – v0*dot;
- *   v2.normalize();              // { v0, v2 } is now an orthonormal basis
- *
- *   return v0*cos(theta) + v2*sin(theta);
- * }
- */
-
-//from new source at eve/client/script/ui/services\flightControls.py
-//  self.curve = trinity.Tr2QuaternionLerpCurve()
 
 // ===== НОВАЯ ВЕРСИЯ Turn с официальной физикой поворота =====
 void DestinyManager::Turn() {
@@ -1108,6 +1090,8 @@ void DestinyManager::Turn() {
      */
     // set ship turn amount based on position in turn, current speed and ship agility
 
+    // Interpolate the current heading toward the target, then restore the
+    // unit-vector invariant.
     GVector deltaHeading(m_shipHeading, m_targetHeading);
     
     // Используем rotationSpeed вместо m_degPerTic
@@ -2176,18 +2160,18 @@ void DestinyManager::Orbit(SystemEntity *pSE, uint32 distance) {
 
 bool DestinyManager::IsAligned(GPoint& targetPoint)
 {
-    if (m_shipHeading.isZero()) {
-        GVector moveVector(m_position, targetPoint);
-        moveVector.normalize();
-        m_shipHeading = moveVector;
-    }
     GVector toVec(m_position, targetPoint);
-    toVec.normalize();
-    double dot = toVec.dotProduct(m_shipHeading);
-    double degrees = EvE::Trig::Rad2Deg(std::acos(dot));
-    if (degrees < TURN_ALIGNMENT)
+    if (!NormalizeDirection(toVec))
+        return false;
+
+    if (!NormalizeDirection(m_shipHeading)) {
+        m_shipHeading = toVec;
         return true;
-    return false;
+    }
+
+    const double dot = ClampedDirectionDot(toVec, m_shipHeading);
+    const double degrees = EvE::Trig::Rad2Deg(std::acos(dot));
+    return (degrees < TURN_ALIGNMENT);
 }
 
 void DestinyManager::Undock(GPoint dir) {

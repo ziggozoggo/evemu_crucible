@@ -27,6 +27,5 @@ Fix `WarpTo`
 - `WarpTo 10,20... desync` исправлен двойной stand-off (дистанция, на которой корабль должен остановиться до цели);
 - После выхода из варпа корабль теперь сохраняет `align` на цель (удалён `SetBallVelocity(0,0,0)`, сбрасывавший клиентский heading; `WarpStop()` теперь отправляет только `CmdStop`).
 
-
-m_stopDistance возвращён к int32, устраняя повреждение varargs-логов: DestinyManager.h:138,228.
-https://github.com/EvEmu-Project/evemu_Crucible/pull/295
+Fix `Dot Product`
+- безопасная нормализация через std::hypot:;
