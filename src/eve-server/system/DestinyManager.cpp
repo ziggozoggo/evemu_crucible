@@ -273,11 +273,13 @@ void DestinyManager::ProcessState() {
             const double dot = ClampedDirectionDot(toVec, m_shipHeading);
             double degrees = EvE::Trig::Rad2Deg(std::acos(dot));
 
-            if ((degrees < WARP_ALIGNMENT) and (m_timeFraction > 0.749)) {
+            // m_timeFraction also approaches 1 while braking; only actual
+            // velocity can satisfy the warp-entry speed requirement.
+            if ((degrees < WARP_ALIGNMENT) and (m_activeSpeedFraction >= 0.75)) {
                 m_shipHeading = toVec;
                 InitWarp();
                 return;
-            } else if (m_timeFraction < 0.749 && m_userSpeedFraction < 0.7499) {
+            } else if (m_activeSpeedFraction < 0.75 && m_userSpeedFraction < 0.75) {
                 SetSpeedFraction(1.0, true);
             } else if ((sEntityList.GetStamp() - m_stateStamp) > m_timeToEnterWarp + 0.3) {
                 if (mySE->HasPilot()) {
@@ -510,8 +512,9 @@ void DestinyManager::SetSpeedFraction(double fraction, bool startMovement) {
         UpdateVelocity(false);
     }
 
-    if (m_ballMode == Destiny::Ball::Mode::WARP) {
-        // set state to Ball::Mode::GOTO after setting warp decel variables, so warp completion will decel properly
+    if ((m_ballMode == Destiny::Ball::Mode::WARP) and (m_warpState != nullptr)) {
+        // Leave warp mode only on completion.  Alignment also calls
+        // SetSpeedFraction(1.0, true), before InitWarp creates m_warpState.
         m_ballMode = Destiny::Ball::Mode::GOTO;
         return;
     }
@@ -636,11 +639,11 @@ void DestinyManager::Stop() {
         mySE->GetPilot()->SetAutoPilot(false);
     }
 
-    if (m_userSpeedFraction == 0.0) {
-        m_stop = true;
-    } else if  ((m_ballMode == Destiny::Ball::Mode::WARP) and (!IsWarping()))  {
-        //warp aborted before initialized.  standard Stop() applies.
+    if ((m_ballMode == Destiny::Ball::Mode::WARP) and (!IsWarping())) {
+        // Cancel alignment even if the requested speed is already zero.
         m_ballMode = Destiny::Ball::Mode::STOP;
+    } else if (m_userSpeedFraction == 0.0) {
+        m_stop = true;
     } else if (IsMoving()) {
         //stop called while moving
         m_ballMode = Destiny::Ball::Mode::STOP;
