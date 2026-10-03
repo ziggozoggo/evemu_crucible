@@ -632,7 +632,8 @@ PyResult BeyonceBound::CmdStop(PyCallArgs &call) {
         codelog(CLIENT__ERROR, "%s: Client has no destiny manager!", call.client->GetName());
         return PyStatic.NewNone();
     }
-    if (!pDestiny->IsMoving())
+    // An aligning ship may still have zero speed, but CmdStop must cancel its pending warp.
+    if (!pDestiny->IsMoving() && pDestiny->GetState() != Destiny::Ball::Mode::WARP)
         return PyStatic.NewNone();
     if (pDestiny->IsWarping()) {
         call.client->SendNotifyMsg( "You can't do this while warping");
