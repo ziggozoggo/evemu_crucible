@@ -2,6 +2,11 @@
 
 Original [ChangeLog](doc/ChangeLog.md)
 
+## 2026-10-03
+Fix `Noob Ship Repair station`
+- Refactor: рассчет вынесен в отдельную функцию;
+- Цена ремонта 0 ISK приводиться 1.00 ISK
+
 ## 2026-10-02
 
 Fix `649a108` @Black007Angel:

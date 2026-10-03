@@ -37,6 +37,16 @@
 #include "system/SystemManager.h"
 #include "services/ServiceManager.h"
 
+namespace {
+double RepairCostPerUnitOfDamage(const InventoryItemRef& item) {
+    const double modifier = item->IsShipItem()
+        ? sConfig.rates.ShipRepairModifier
+        : sConfig.rates.ModuleRepairModifier;
+    const double cost = item->type().basePrice() * modifier;
+    return cost == 0.0 ? 1.0 : cost;
+}
+}
+
 
 RepairService::RepairService(EVEServiceManager& mgr) :
     BindableService ("repairSvc", mgr)
@@ -96,13 +106,8 @@ void RepairService::GetDamageReports(uint32 itemID, Inventory* pInv, PyList* lis
         if (cur->IsShipItem()) {    // have to check for drone here, also
             rid.damage += cur->GetAttribute(AttrArmorDamage).get_int();
             rid.maxHealth += cur->GetAttribute(AttrArmorHP).get_int();
-            // ship is (basePrice)*7.5e-10
-            rid.costToRepairOneUnitOfDamage = (cur->type().basePrice() * sConfig.rates.ShipRepairModifier);
         }
-        else {
-            // modules are (basePrice)*1.25e-6
-            rid.costToRepairOneUnitOfDamage = (cur->type().basePrice() * sConfig.rates.ModuleRepairModifier);
-        }
+        rid.costToRepairOneUnitOfDamage = RepairCostPerUnitOfDamage(cur);
 
         list->AddItem(rid.Encode());
     }
@@ -226,7 +231,7 @@ PyResult RepairServiceBound::RepairItems(PyCallArgs &call, PyList* itemIDs, PyFl
      */
 
     InventoryItemRef iRef(nullptr);
-    double cost(0), total(0);
+    double total(0);
     uint32 damage(0);
     std::vector<InventoryItemRef> itemRefVec;
     PyList::const_iterator itr = itemIDs->begin(), end = itemIDs->end();
@@ -235,18 +240,11 @@ PyResult RepairServiceBound::RepairItems(PyCallArgs &call, PyList* itemIDs, PyFl
         if (iRef.get() == nullptr)
             continue;
 
-        cost = 0;
         damage = iRef->GetAttribute(AttrDamage).get_uint32();
         itemRefVec.push_back(iRef);
-        if (iRef->IsShipItem()) {
+        if (iRef->IsShipItem())
             damage += iRef->GetAttribute(AttrArmorDamage).get_uint32();
-            // ship is (basePrice)*7.5e-10
-            cost = (iRef->type().basePrice() * sConfig.rates.ShipRepairModifier);
-        } else {
-            // modules are (basePrice)*1.25e-6
-            cost = (iRef->type().basePrice() * sConfig.rates.ModuleRepairModifier);
-        }
-        total += damage * cost;
+        total += damage * RepairCostPerUnitOfDamage(iRef);
     }
 
     float fraction = 1.0;
