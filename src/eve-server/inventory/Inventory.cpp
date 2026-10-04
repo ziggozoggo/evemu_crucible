@@ -122,8 +122,17 @@ bool Inventory::LoadContents() {
         if (pClient->IsCharCreation())
             return true;
         if (sDataMgr.IsStation(m_myID)) {
-            if (pClient->IsHangarLoaded(m_myID))
+            if (pClient->IsHangarLoaded(m_myID)) {
+                if (is_log_enabled(MANUF__DEBUG))
+                    _log(MANUF__DEBUG, "RAM material hangar load skipped: char=%u station=%u contentsLoaded=%u contents=%lu flagEntries=%lu",
+                         pClient->GetCharacterID(), m_myID, (uint32)mContentsLoaded,
+                         (unsigned long)mContents.size(), (unsigned long)m_contentsByFlag.size());
                 return true;
+            }
+            if (is_log_enabled(MANUF__DEBUG))
+                _log(MANUF__DEBUG, "RAM material hangar load begin: char=%u station=%u contentsLoaded=%u contents=%lu flagEntries=%lu",
+                     pClient->GetCharacterID(), m_myID, (uint32)mContentsLoaded,
+                     (unsigned long)mContents.size(), (unsigned long)m_contentsByFlag.size());
             pClient->AddStationHangar(m_myID);
             mContentsLoaded = false;
         }
@@ -195,6 +204,11 @@ bool Inventory::LoadContents() {
     if (sConfig.debug.UseProfiling)
         sProfiler.AddTime(Profile::itemload, GetTimeUSeconds() - profileStartTime);
 
+    if (pClient != nullptr && sDataMgr.IsStation(m_myID) && is_log_enabled(MANUF__DEBUG))
+        _log(MANUF__DEBUG, "RAM material hangar load end: char=%u station=%u dbItems=%lu contents=%lu flagEntries=%lu",
+             pClient->GetCharacterID(), m_myID, (unsigned long)items.size(),
+             (unsigned long)mContents.size(), (unsigned long)m_contentsByFlag.size());
+
     return (mContentsLoaded = true);
 }
 
@@ -204,16 +218,31 @@ void Inventory::AddItem(InventoryItemRef iRef) {
         return;
 
     std::map<uint32, InventoryItemRef>::iterator itr = mContents.find(iRef->itemID());
-    std::pair <std::map<uint32, InventoryItemRef>::iterator, bool > test;
-    if (itr == mContents.end())
-        test = mContents.emplace(iRef->itemID(), iRef);
-
-    if (test.second) {
+    const bool alreadyPresent = (itr != mContents.end());
+    const bool materialDebug = is_log_enabled(MANUF__DEBUG) && sDataMgr.IsStation(m_myID);
+    uint32 flagOccurrences = 0;
+    if (materialDebug) {
+        auto range = m_contentsByFlag.equal_range(iRef->flag());
+        for (auto cur = range.first; cur != range.second; ++cur)
+            if (cur->second->itemID() == iRef->itemID())
+                ++flagOccurrences;
+    }
+    if (!alreadyPresent) {
+        mContents.emplace(iRef->itemID(), iRef);
         _log(INV__TRACE, "Inventory::AddItem() - Updated %s(%u) to contain (%u) %s(%u) in %s.", \
-                m_self->name(), m_myID, iRef->quantity(), iRef->name(), iRef->itemID(), sDataMgr.GetFlagName(iRef->flag()));
+                 m_self->name(), m_myID, iRef->quantity(), iRef->name(), iRef->itemID(), sDataMgr.GetFlagName(iRef->flag()));
     } else {
+        // Loading another character's station hangar can visit items already in memory.
+        // Replace stale flag entries rather than indexing the same item twice.
+        itr->second = iRef;
+        for (auto cur = m_contentsByFlag.begin(); cur != m_contentsByFlag.end();) {
+            if (cur->second->itemID() == iRef->itemID())
+                cur = m_contentsByFlag.erase(cur);
+            else
+                ++cur;
+        }
         _log(INV__TRACE, "Inventory::AddItem() - %s(%u) already contains %s(%u) in %s.", \
-                m_self->name(), m_myID, iRef->name(), iRef->itemID(), sDataMgr.GetFlagName(iRef->flag()));
+                 m_self->name(), m_myID, iRef->name(), iRef->itemID(), sDataMgr.GetFlagName(iRef->flag()));
     }
 
     // need to find and remove skill in training flag here for proper skill search
@@ -226,6 +255,10 @@ void Inventory::AddItem(InventoryItemRef iRef) {
     } else {
         m_contentsByFlag.emplace(iRef->flag(), iRef);
     }
+    if (materialDebug)
+        _log(MANUF__DEBUG, "RAM material hangar add: station=%u item=%u type=%u flag=%u quantity=%i inContentsBefore=%u flagOccurrencesBefore=%u flagOccurrencesAfter=%u",
+             m_myID, iRef->itemID(), iRef->typeID(), (uint32)iRef->flag(), iRef->quantity(),
+             (uint32)alreadyPresent, flagOccurrences, 1);
 
     // Apply iHub upgrades
     if (m_self->typeID() == EVEDB::invTypes::InfrastructureHub) {
@@ -243,6 +276,18 @@ void Inventory::RemoveItem(InventoryItemRef iRef) {
     if (iRef.get() == nullptr)
         return;
 
+    const bool materialDebug = is_log_enabled(MANUF__DEBUG) && sDataMgr.IsStation(m_myID);
+    uint32 flagOccurrences = 0;
+    if (materialDebug) {
+        auto entries = m_contentsByFlag.equal_range(iRef->flag());
+        for (auto cur = entries.first; cur != entries.second; ++cur)
+            if (cur->second->itemID() == iRef->itemID())
+                ++flagOccurrences;
+        _log(MANUF__DEBUG, "RAM material hangar remove begin: station=%u item=%u type=%u flag=%u quantity=%i inContents=%u flagOccurrences=%u",
+             m_myID, iRef->itemID(), iRef->typeID(), (uint32)iRef->flag(), iRef->quantity(),
+             (uint32)(mContents.find(iRef->itemID()) != mContents.end()), flagOccurrences);
+    }
+
     std::map<uint32, InventoryItemRef>::iterator itr = mContents.find(iRef->itemID());
     if (itr != mContents.end()) {
         mContents.erase(itr);
@@ -253,19 +298,24 @@ void Inventory::RemoveItem(InventoryItemRef iRef) {
                 m_self->name(), m_myID, iRef->name(), iRef->itemID(), sDataMgr.GetFlagName(iRef->flag()));
     }
 
-    /** @todo @note  this isnt working right, and im not sure why yet...  */
-    auto range = m_contentsByFlag.equal_range(iRef->flag());
-    for (auto cur = range.first; cur != range.second; ++cur) {
-        if (cur->second == iRef) {
-            m_contentsByFlag.erase(cur);
-            _log(INV__TRACE, "Inventory::RemoveItem(2) - %s(%u) removed from %s(%u) flagMap at %s.", \
-                    iRef->name(), iRef->itemID(), m_self->name(), m_myID, sDataMgr.GetFlagName(iRef->flag()));
-            return;
+    // Remove every entry, including duplicates left by a previous hangar load.
+    uint32 removed = 0;
+    for (auto cur = m_contentsByFlag.begin(); cur != m_contentsByFlag.end();) {
+        if (cur->second->itemID() == iRef->itemID()) {
+            cur = m_contentsByFlag.erase(cur);
+            ++removed;
+        } else {
+            ++cur;
         }
     }
-
-    _log(INV__WARNING,"Inventory::RemoveItem(2) - %s(%u) flagMap does not contain %s(%u) in %s.", \
-            m_self->name(), m_myID, iRef->name(), iRef->itemID(), sDataMgr.GetFlagName(iRef->flag()));
+    if (materialDebug)
+        _log(MANUF__DEBUG, "RAM material hangar remove end: station=%u item=%u flagOccurrencesRemaining=0", m_myID, iRef->itemID());
+    if (removed == 0)
+        _log(INV__WARNING,"Inventory::RemoveItem(2) - %s(%u) flagMap does not contain %s(%u) in %s.", \
+                m_self->name(), m_myID, iRef->name(), iRef->itemID(), sDataMgr.GetFlagName(iRef->flag()));
+    else
+        _log(INV__TRACE, "Inventory::RemoveItem(2) - %s(%u) removed from %s(%u) flagMap at %s.", \
+                iRef->name(), iRef->itemID(), m_self->name(), m_myID, sDataMgr.GetFlagName(iRef->flag()));
 }
 
 void Inventory::DeleteContents()

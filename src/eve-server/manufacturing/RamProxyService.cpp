@@ -278,11 +278,40 @@ PyResult RamProxyService::InstallJob(PyCallArgs &call, PyRep* locationData, PyRe
     std::vector<EvERam::RequiredItem> reqItems;
     sDataMgr.GetRamRequiredItems(bpRef->typeID(), (int8)args.activityID, reqItems);
 
+    const bool materialDebug = is_log_enabled(MANUF__DEBUG);
+    const bool quoteOnly = PyRep::IntegerValueU32(call.byname["quoteOnly"]);
+    if (materialDebug) {
+        _log(MANUF__DEBUG, "RAM material request: char=%u bp=%u activity=%u runs=%u corp=%u quote=%u bpPathEntries=%llu bomPathEntries=%llu requestedBOMLocation=%u resolvedBOM=%u/%u/%u outputFlag=%u",
+             call.client->GetCharacterID(), args.bpItemID, (uint32)args.activityID, args.runs,
+             (uint32)args.isCorpJob, (uint32)quoteOnly,
+             (unsigned long long)args.bpLocPath->size(), (unsigned long long)args.bomLocPath->size(),
+             args.bomLocationID, bomLocPath.locationID, bomLocPath.ownerID,
+             (uint32)bomLocPath.flagID, (uint32)args.outputFlag);
+        if (!args.isCorpJob && args.bomLocPath->size() > 0) {
+            PathElement requestedBomPath;
+            if (requestedBomPath.Decode(args.bomLocPath->GetItem(0))) {
+                _log(MANUF__DEBUG, "RAM material requested BOM path: char=%u bp=%u location=%u owner=%u flag=%u",
+                     call.client->GetCharacterID(), args.bpItemID, requestedBomPath.locationID,
+                     requestedBomPath.ownerID, (uint32)requestedBomPath.flagID);
+            } else {
+                _log(MANUF__DEBUG, "RAM material requested BOM path: char=%u bp=%u decode failed",
+                     call.client->GetCharacterID(), args.bpItemID);
+            }
+        }
+    }
+    if (materialDebug)
+        _log(MANUF__DEBUG, "RAM material requirements: char=%u bp=%u entries=%lu materialMultiplier=%.6f charMaterialMultiplier=%.6f",
+             call.client->GetCharacterID(), args.bpItemID, (unsigned long)reqItems.size(),
+             rsp.materialMultiplier, rsp.charMaterialMultiplier);
+
     // quoteOnly is sent for all jobs before installation to approve price and timeframe
-    if (PyRep::IntegerValueU32(call.byname["quoteOnly"])) {
+    if (quoteOnly) {
         _log(MANUF__INFO, "quoteOnly = true");
         sRamMthd.EncodeBillOfMaterials(reqItems, rsp.materialMultiplier, rsp.charMaterialMultiplier, args.runs, rsp.bom);
         sRamMthd.EncodeMissingMaterials(reqItems, bomLocPath, call.client, rsp.materialMultiplier, rsp.charMaterialMultiplier, args.runs, rsp.missingMaterials);
+        if (materialDebug)
+            _log(MANUF__DEBUG, "RAM material quote: char=%u bp=%u missingTypes=%lu",
+                 call.client->GetCharacterID(), args.bpItemID, (unsigned long)rsp.missingMaterials.size());
 
         // this value is halved in client code. (removed in client update patch 5Nov20)
         //rsp.charTimeMultiplier *= 2;
@@ -377,27 +406,61 @@ PyResult RamProxyService::InstallJob(PyCallArgs &call, PyRep* locationData, PyRe
     // take required items
     std::vector<InventoryItemRef> items;
     sRamMthd.GetBOMItems( bomLocPath, items );
+    if (materialDebug) {
+        std::map<uint16, bool> requiredMaterials;
+        for (const auto& required : reqItems)
+            if (!required.isSkill)
+                requiredMaterials[required.typeID] = true;
+        std::map<uint32, uint32> occurrences;
+        for (const auto& item : items) {
+            if (requiredMaterials.find(item->typeID()) == requiredMaterials.end())
+                continue;
+            uint32 count = ++occurrences[item->itemID()];
+            _log(MANUF__DEBUG, "RAM material consume source: job=%u location=%u flag=%u item=%u type=%u owner=%u quantity=%i occurrence=%u",
+                 jobID, bomLocPath.locationID, (uint32)bomLocPath.flagID, item->itemID(),
+                 item->typeID(), item->ownerID(), item->quantity(), count);
+        }
+    }
 
-    std::vector<EvERam::RequiredItem>::iterator itemItr = reqItems.begin();
-    for (; itemItr != reqItems.end(); ++itemItr) {
-        if (itemItr->isSkill)
-            continue;       // not interested
-
-        // calculate needed quantity
-        uint32 qtyNeeded = (uint32)round(((itemItr->quantity * rsp.materialMultiplier) + (itemItr->quantity * rsp.charMaterialMultiplier - itemItr->quantity)) * args.runs);
+    std::map<uint16, uint32> requiredMaterials;
+    for (const auto& required : reqItems) {
+        if (!required.isSkill)
+            requiredMaterials[required.typeID] += sRamMthd.MaterialQuantity(required, rsp.materialMultiplier, rsp.charMaterialMultiplier, args.runs);
+    }
+    for (const auto& required : requiredMaterials) {
+        uint32 qtyNeeded = required.second;
+        uint32 unconsumed = qtyNeeded;
+        if (materialDebug)
+            _log(MANUF__DEBUG, "RAM material consume begin: job=%u type=%u needed=%u",
+                 jobID, required.first, qtyNeeded);
 
         // consume required materials
         std::vector<InventoryItemRef>::iterator refItr = items.begin();
         for (; refItr != items.end(); ++refItr)
-            if ((*refItr)->typeID() == itemItr->typeID) {
+            if ((*refItr)->typeID() == required.first && qtyNeeded > 0) {
                 if (qtyNeeded >= (*refItr)->quantity()) {
+                    if (materialDebug)
+                        _log(MANUF__DEBUG, "RAM material consume delete: job=%u type=%u item=%u quantity=%i remainingBefore=%u",
+                             jobID, required.first, (*refItr)->itemID(), (*refItr)->quantity(), qtyNeeded);
                     qtyNeeded -= (*refItr)->quantity();
+                    unconsumed = qtyNeeded;
                     (*refItr)->Delete();
                 } else {
-                    (*refItr)->AlterQuantity(-qtyNeeded, true);
+                    uint32 itemID = (*refItr)->itemID();
+                    int32 quantity = (*refItr)->quantity();
+                    bool changed = (*refItr)->AlterQuantity(-qtyNeeded, true);
+                    if (changed)
+                        unconsumed = 0;
+                    if (materialDebug)
+                        _log(MANUF__DEBUG, "RAM material consume partial: job=%u type=%u item=%u before=%i requested=%u changed=%u after=%i remaining=%u",
+                             jobID, required.first, itemID, quantity, qtyNeeded, (uint32)changed,
+                             (*refItr)->quantity(), unconsumed);
                     break;  // we are done, stop searching
                 }
             }
+        if (materialDebug)
+            _log(MANUF__DEBUG, "RAM material consume end: job=%u type=%u remaining=%u",
+                 jobID, required.first, unconsumed);
     }
 
     // update runs and do other shit where applicable

@@ -37,6 +37,8 @@ public:
 
     void ProductionTimeCheck(uint32 productionTime);
     void MaterialSkillsCheck(Client* const pClient, uint32 runs, const PathElement& bomLocation, const Rsp_InstallJob& rsp, const std::vector< EvERam::RequiredItem >& reqItems);
+    // The quantity charged to a job; shared by quote, installation and consumption.
+    uint32 MaterialQuantity(const EvERam::RequiredItem& item, float materialMultiplier, float charMaterialMultiplier, uint32 runs) const;
 
     void VerifyCompleteJob(const Call_CompleteJob& args, EvERam::JobProperties& data, Client*const pClient);
 
@@ -45,7 +47,6 @@ public:
     void EncodeMissingMaterials(const std::vector< EvERam::RequiredItem >& reqItems, const PathElement& bomLocation, Client*const pClient, float materialMultiplier, float charMaterialMultiplier, int32 runs, std::map< int32, PyRep* >& into);
 
     void GetBOMItems(const PathElement &bomLocation, std::vector<InventoryItemRef> &into);
-    void GetBOMItemsMap(const PathElement &bomLocation, std::map<uint16, InventoryItemRef> &into);
 
     void GetAdjustedRamRequiredMaterials();
     const char* GetActivityName(int8 activityID);
