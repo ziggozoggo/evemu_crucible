@@ -15,6 +15,7 @@
 #include "manufacturing/Blueprint.h"
 #include "manufacturing/RamMethods.h"
 #include "station/StationDataMgr.h"
+#include <set>
 
 static const uint32 RAM_PRODUCTION_TIME_LIMIT = 60*60*24*30;   //30 days
 
@@ -348,34 +349,58 @@ void RamMethods::LocationRolesCheck(Client*const pClient, const CorpPathElement 
 
 void RamMethods::MaterialSkillsCheck(Client* const pClient, uint32 runs, const PathElement& bomLocation, const Rsp_InstallJob& rsp, const std::vector< EvERam::RequiredItem >& reqItems)
 {
-    std::map<uint16, InventoryItemRef> items;   // typeID, itemRef
-    GetBOMItemsMap( bomLocation, items );
+    std::vector<InventoryItemRef> items;
+    GetBOMItems(bomLocation, items);
+    const bool materialDebug = is_log_enabled(MANUF__DEBUG);
+    if (materialDebug)
+        _log(MANUF__DEBUG, "RAM material install inventory: char=%u location=%u flag=%u selectedTypes=%lu runs=%u",
+             pClient->GetCharacterID(), bomLocation.locationID, (uint32)bomLocation.flagID,
+             (unsigned long)items.size(), runs);
 
-    for (auto cur : reqItems) {
+    std::map<uint16, uint32> requiredMaterials;
+    for (const auto& cur : reqItems) {
         if (cur.isSkill) { // check skill (quantity is required level)
-            if (pClient->GetChar()->GetSkillLevel(cur.typeID) < cur.quantity) {
+            uint32 level = pClient->GetChar()->GetSkillLevel(cur.typeID);
+            if (materialDebug)
+                _log(MANUF__DEBUG, "RAM material install skill: char=%u type=%u required=%u actual=%u",
+                     pClient->GetCharacterID(), cur.typeID, cur.quantity, level);
+            if (level < cur.quantity) {
                 throw UserError ("RamNeedSkillForJob")
                         .AddFormatValue ("skillID", new PyInt (cur.typeID))
                         .AddFormatValue ("skillLevel", new PyInt (cur.quantity));
             }
         } else {
-            uint32 qtyNeeded = round(cur.quantity * rsp.materialMultiplier) * runs;
-            if (cur.damagePerJob == 1)
-                qtyNeeded += round(cur.quantity * rsp.charMaterialMultiplier - cur.quantity) * runs;
-            std::map<uint16, InventoryItemRef>::iterator itr = items.find(cur.typeID);
-            if (itr != items.end())
-                if (itr->second->typeID() == cur.typeID) {
-                    if (itr->second->quantity() < qtyNeeded)
-                        qtyNeeded -= itr->second->quantity();
-                    else
-                        qtyNeeded = 0;
-                }
-
-            if (qtyNeeded)
-                throw UserError ("RamNeedMoreForJob")
-                        .AddFormatValue ("item", new PyInt (cur.typeID));
+            requiredMaterials[cur.typeID] += MaterialQuantity(cur, rsp.materialMultiplier, rsp.charMaterialMultiplier, runs);
         }
     }
+
+    for (const auto& required : requiredMaterials) {
+        uint32 qtyNeeded = required.second;
+        if (materialDebug)
+            _log(MANUF__DEBUG, "RAM material install check: char=%u type=%u runs=%u required=%u",
+                 pClient->GetCharacterID(), required.first, runs, qtyNeeded);
+        for (const auto& item : items) {
+            if (item->typeID() == required.first && qtyNeeded > 0)
+                qtyNeeded -= std::min(qtyNeeded, (uint32)item->quantity());
+        }
+
+        if (materialDebug)
+            _log(MANUF__DEBUG, "RAM material install result: char=%u type=%u required=%u missing=%u accepted=%u",
+                 pClient->GetCharacterID(), required.first, required.second, qtyNeeded, (uint32)(qtyNeeded == 0));
+
+        if (qtyNeeded)
+            throw UserError ("RamNeedMoreForJob")
+                    .AddFormatValue ("item", new PyInt (required.first));
+    }
+}
+
+uint32 RamMethods::MaterialQuantity(const EvERam::RequiredItem& item, float materialMultiplier, float charMaterialMultiplier, uint32 runs) const
+{
+    // Extra materials are listed separately from raw materials and have no skill waste.
+    if (item.extra)
+        return (uint32)round(item.quantity * materialMultiplier) * runs;
+    return (uint32)round(item.quantity * materialMultiplier +
+                         (item.quantity * charMaterialMultiplier - item.quantity)) * runs;
 }
 
 void RamMethods::ProductionTimeCheck(uint32 productionTime)
@@ -511,10 +536,13 @@ void RamMethods::EncodeBillOfMaterials(const std::vector<EvERam::RequiredItem> &
     for (auto cur : reqItems) {
         if (cur.isSkill) {
             into.skills[cur.typeID] = new PyInt(cur.quantity);
+            if (is_log_enabled(MANUF__DEBUG))
+                _log(MANUF__DEBUG, "RAM material BOM skill: type=%u requiredLevel=%u",
+                     cur.typeID, cur.quantity);
             continue;
         }
 
-        int qtyNeeded = (uint32)round(cur.quantity * materialMultiplier + (cur.quantity * charMaterialMultiplier - cur.quantity)) * runs;
+        uint32 qtyNeeded = MaterialQuantity(cur, materialMultiplier, charMaterialMultiplier, runs);
 
         // otherwise, make line for material list
         MaterialList_Line line;
@@ -523,6 +551,11 @@ void RamMethods::EncodeBillOfMaterials(const std::vector<EvERam::RequiredItem> &
         line.damagePerJob = cur.damagePerJob;
         line.isSkillCheck = false;  // no idea what is this for
         line.requiresHP = false;    // no idea what is this for
+
+        if (is_log_enabled(MANUF__DEBUG))
+            _log(MANUF__DEBUG, "RAM material BOM line: type=%u extra=%u base=%u runs=%u materialMultiplier=%.6f charMaterialMultiplier=%.6f rawOrExtra=%i total=%i waste=%i damagePerJob=%.6f",
+                 cur.typeID, (uint32)cur.extra, cur.quantity, runs, materialMultiplier, charMaterialMultiplier,
+                 line.quantity, qtyNeeded, (cur.extra ? 0 : qtyNeeded - line.quantity), cur.damagePerJob);
 
         /** @todo update this shit.....  */
         // "Extra material" is not affected by skills, and return upon completion
@@ -551,52 +584,91 @@ void RamMethods::EncodeMissingMaterials(const std::vector<EvERam::RequiredItem> 
 
     //get the items
     GetBOMItems( bomLocation, items );
-
-    //now do the check
-    uint32 qtyReq(0);
-    for (auto cur : reqItems) {
-        qtyReq = cur.quantity;
-        if (!cur.isSkill) {
-            qtyReq = (uint32)round(qtyReq * materialMultiplier + (cur.quantity * charMaterialMultiplier - cur.quantity)) * runs;
+    const bool materialDebug = is_log_enabled(MANUF__DEBUG);
+    if (materialDebug) {
+        _log(MANUF__DEBUG, "RAM material quote inventory: char=%u location=%u owner=%u flag=%u entries=%lu runs=%i materialMultiplier=%.6f charMaterialMultiplier=%.6f",
+             pClient->GetCharacterID(), bomLocation.locationID, bomLocation.ownerID, (uint32)bomLocation.flagID,
+             (unsigned long)items.size(), runs, materialMultiplier, charMaterialMultiplier);
+        std::map<uint16, bool> requiredMaterials;
+        for (const auto& required : reqItems)
+            if (!required.isSkill)
+                requiredMaterials[required.typeID] = true;
+        std::map<uint32, uint32> occurrences;
+        for (const auto& item : items) {
+            if (requiredMaterials.find(item->typeID()) == requiredMaterials.end())
+                continue;
+            uint32 count = ++occurrences[item->itemID()];
+            _log(MANUF__DEBUG, "RAM material quote source: char=%u item=%u type=%u owner=%u quantity=%i location=%u flag=%u occurrence=%u",
+                 pClient->GetCharacterID(), item->itemID(), item->typeID(), item->ownerID(), item->quantity(),
+                 item->locationID(), (uint32)item->flag(), count);
         }
+    }
 
-        std::vector<InventoryItemRef>::iterator itri, endi;
-        if (cur.isSkill) {
-            itri = skills.begin();
-            endi = skills.end();
-        } else {
-            itri = items.begin();
-            endi = items.end();
-        }
+    // Combine requirements for the same type before counting available stacks.
+    std::map<uint16, uint32> requiredMaterials;
+    for (const auto& cur : reqItems) {
+        if (!cur.isSkill)
+            requiredMaterials[cur.typeID] += MaterialQuantity(cur, materialMultiplier, charMaterialMultiplier, runs);
+    }
 
-        for (; itri != endi and qtyReq > 0; ++itri) {
-            if (((*itri)->typeID() == cur.typeID)
-            and (((*itri)->ownerID() == pClient->GetCharacterID())
-              or ((*itri)->ownerID() == pClient->GetCorporationID()))) {
-                if (cur.isSkill) {
-                    qtyReq -= std::min(qtyReq, (*itri)->GetAttribute(AttrSkillLevel).get_uint32() );
-                } else {
-                    qtyReq -= std::min(qtyReq, (uint32)(*itri)->quantity() );
-                }
+    for (const auto& cur : reqItems) {
+        if (!cur.isSkill)
+            continue;
+        uint32 qtyReq = cur.quantity;
+        uint32 required = qtyReq;
+
+        for (const auto& item : skills) {
+            if (qtyReq > 0 && item->typeID() == cur.typeID && item->ownerID() == pClient->GetCharacterID()) {
+                uint32 before = qtyReq;
+                qtyReq -= std::min(qtyReq, item->GetAttribute(AttrSkillLevel).get_uint32());
+                if (materialDebug)
+                    _log(MANUF__DEBUG, "RAM material quote matched: char=%u type=%u skill=%u item=%u available=%u used=%u remaining=%u",
+                         pClient->GetCharacterID(), cur.typeID, 1u, item->itemID(),
+                         item->GetAttribute(AttrSkillLevel).get_uint32(),
+                         before - qtyReq, qtyReq);
             }
         }
 
+        if (materialDebug)
+            _log(MANUF__DEBUG, "RAM material quote result: char=%u type=%u skill=%u base=%u required=%u missing=%u",
+                 pClient->GetCharacterID(), cur.typeID, 1u, cur.quantity, required, qtyReq);
+
         if (qtyReq > 0)
             into[cur.typeID] = new PyInt(qtyReq);
+    }
+
+    for (const auto& required : requiredMaterials) {
+        uint32 qtyReq = required.second;
+        for (const auto& item : items) {
+            if (qtyReq > 0 && item->typeID() == required.first) {
+                uint32 before = qtyReq;
+                qtyReq -= std::min(qtyReq, (uint32)item->quantity());
+                if (materialDebug)
+                    _log(MANUF__DEBUG, "RAM material quote matched: char=%u type=%u skill=0 item=%u available=%u used=%u remaining=%u",
+                         pClient->GetCharacterID(), required.first, item->itemID(),
+                         (uint32)item->quantity(), before - qtyReq, qtyReq);
+            }
+        }
+        if (materialDebug)
+            _log(MANUF__DEBUG, "RAM material quote result: char=%u type=%u skill=0 required=%u missing=%u",
+                 pClient->GetCharacterID(), required.first, required.second, qtyReq);
+        if (qtyReq > 0)
+            into[required.first] = new PyInt(qtyReq);
     }
 }
 void RamMethods::GetBOMItems(const PathElement& bomLocation, std::vector< InventoryItemRef >& into)
 {
     Inventory *inventory = sItemFactory.GetInventoryFromId( bomLocation.locationID );
-    if (inventory != nullptr )
-        inventory->GetItemsByFlag((EVEItemFlags)bomLocation.flagID, into );
-}
+    if (inventory == nullptr)
+        return;
 
-void RamMethods::GetBOMItemsMap(const PathElement& bomLocation, std::map< uint16, InventoryItemRef >& into)
-{
-    Inventory *inventory = sItemFactory.GetInventoryFromId( bomLocation.locationID );
-    if (inventory != nullptr )
-        inventory->GetTypesByFlag( (EVEItemFlags)bomLocation.flagID, into );
+    std::vector<InventoryItemRef> contents;
+    inventory->GetItemsByFlag((EVEItemFlags)bomLocation.flagID, contents);
+    std::set<uint32> seen;
+    for (const auto& item : contents) {
+        if (item->ownerID() == bomLocation.ownerID && seen.insert(item->itemID()).second)
+            into.push_back(item);
+    }
 }
 
 /* For each material required for a blueprint (from invTypeMaterials), the quantity is affected by ME research and skills.
@@ -630,4 +702,3 @@ const char* RamMethods::GetActivityName(int8 activityID)
     }
     return "Undefined";
 }
-

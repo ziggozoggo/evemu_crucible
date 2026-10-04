@@ -281,19 +281,12 @@ void DestinyManager::ProcessState() {
                 return;
             } else if (m_activeSpeedFraction < 0.75 && m_userSpeedFraction < 0.75) {
                 SetSpeedFraction(1.0, true);
-            } else if ((sEntityList.GetStamp() - m_stateStamp) > m_timeToEnterWarp + 0.3) {
-                if (mySE->HasPilot()) {
-                    _log(DESTINY__ERROR, "Destiny::ProcessState() Error!  Ship %s(%u) for Player %s(%u) - warp align/speed is incorrect, but time > shipTimeToWarp.",  \
-                                mySE->GetName(), mySE->GetID(), mySE->GetPilot()->GetName(), mySE->GetPilot()->GetCharacterID());
-                } else {
-                    _log(DESTINY__ERROR, "Destiny::ProcessState() Error!  NPC %s(%u) - warp align/speed is incorrect, but time > shipTimeToWarp.",  \
-                            mySE->GetName(), mySE->GetID());
-                }
-                m_shipHeading = toVec;
-                InitWarp();
-                return;
             }
 
+            // Alignment can take longer than m_timeToEnterWarp when the ship
+            // starts at full speed in another direction (e.g. after undock).
+            // Never skip the heading/speed checks just because that estimate
+            // has elapsed; the client is still turning at this point.
             MoveObject();
         } break;
         case Ball::Mode::MUSHROOM:      // aoe?
@@ -1097,16 +1090,12 @@ void DestinyManager::Turn() {
     // unit-vector invariant.
     GVector deltaHeading(m_shipHeading, m_targetHeading);
     
-    // Используем rotationSpeed вместо m_degPerTic
+    // Use the same turn rate on both sides of 100 degrees. Dividing by
+    // (degrees - 100) made a nearly 100-degree turn snap to the warp
+    // heading in one tick (and let the server enter warp before the client).
     double turnPercent(0.1);
     double degrees(EvE::Trig::Rad2Deg(m_radians));
-    if (degrees > 100) {
-        if (m_decel and (m_turnTic > turnTime)) {
-            turnPercent = 0.3;
-        } else {
-            turnPercent = rotationSpeed / (degrees - 100);
-        }
-    } else if (degrees > rotationSpeed) {
+    if (degrees > rotationSpeed) {
         turnPercent = rotationSpeed / (degrees * 0.5);
     } else {
         if (m_decel)
