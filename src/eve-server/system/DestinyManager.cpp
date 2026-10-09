@@ -1699,11 +1699,20 @@ void DestinyManager::WarpUpdate(double currentShipSpeed) {
     SetPosition(m_targetPoint - (m_warpState->warp_vector * m_targetDistance));
 
     bool inTargetBubble = m_targBubble->InBubble(m_position, true);
-    SystemBubble* destinationBubble = m_targBubble;
-    if (!inTargetBubble)
-        destinationBubble = sBubbleMgr.GetBubble(mySE->SystemMgr(), m_position);
-
     SystemBubble* currentBubble = mySE->SysBubble();
+    SystemBubble* destinationBubble = m_targBubble;
+    if (!inTargetBubble) {
+        // A warp tick can land just outside the destination grid. Creating a
+        // temporary bubble there may overlap the destination (and split ships
+        // only a few kilometres apart between different grids). Keep the ship
+        // in its current bubble until it actually enters the destination.
+        if (currentBubble == nullptr or
+            m_targBubble->GetCenter().distance(m_position) >= BUBBLE_RADIUS_METERS * 2)
+            destinationBubble = sBubbleMgr.GetBubble(mySE->SystemMgr(), m_position);
+        else
+            destinationBubble = currentBubble;
+    }
+
     if (currentBubble != destinationBubble) {
         if (currentBubble != nullptr)
             currentBubble->Remove(mySE);
