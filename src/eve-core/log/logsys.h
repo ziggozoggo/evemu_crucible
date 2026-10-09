@@ -84,6 +84,9 @@ extern bool log_close_logfile();
 
 extern bool load_log_settings( const char* filename );
 
+// Local wall-clock time for log prefixes: HH:MM:SS.ffffff.
+extern void log_format_timestamp(char* buffer, size_t size);
+
 extern void log_message(LogType type, const char *fmt, ...);
 extern void log_messageVA(LogType type, const char *fmt, va_list args);
 extern void log_messageVA(LogType type, uint32 iden, const char *fmt, va_list args);
@@ -137,7 +140,6 @@ inline void codelog( LogType type, const char* fmt, ... )
 
 
 #endif /*LOGSYS_H_*/
-
 
 
 
