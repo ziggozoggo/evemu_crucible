@@ -67,6 +67,9 @@
 
 namespace {
     constexpr double DIRECTION_EPSILON = 1e-12;
+    // Empirical fit to the 2026-10-09 Impairor client warp-alignment samples;
+    // not yet measured for other ship classes. Keep ordinary steering unchanged.
+    constexpr double WARP_TURN_AGILITY_FACTOR = 0.655;
 
     bool NormalizeDirection(GVector& direction) {
         const double length = std::hypot(direction.x, direction.y, direction.z);
@@ -1060,6 +1063,30 @@ void DestinyManager::Turn() {
     if (m_turnTic == 1)
         if (m_turnFraction < m_timeFraction)
             UpdateVelocity(true);
+
+    if ((m_ballMode == Destiny::Ball::Mode::WARP) and (m_warpState == nullptr)) {
+        // Approximate the observed warp turn by exponentially reducing the
+        // remaining angle. The ordinary normalized vector lerp below takes
+        // 17 ticks from 136 degrees here; the client takes about 9. A spherical
+        // step avoids the old singularity at 100 degrees.
+        const double timeConstant = std::max(0.001, m_shipAgility * WARP_TURN_AGILITY_FACTOR);
+        const double turnAngle = m_radians * (1.0 - std::exp(-1.0 / timeConstant));
+        GVector perpendicular = m_targetHeading - (m_shipHeading * std::cos(m_radians));
+        if (!NormalizeDirection(perpendicular)) {
+            // Opposite headings have no unique great circle. Pick a stable
+            // perpendicular so a 180-degree warp command can still turn.
+            perpendicular = GVector(-m_shipHeading.y, m_shipHeading.x, 0.0);
+            if (!NormalizeDirection(perpendicular))
+                perpendicular = GVector(1.0, 0.0, 0.0);
+        }
+        m_shipHeading = m_shipHeading * std::cos(turnAngle) + perpendicular * std::sin(turnAngle);
+        m_shipHeading.normalize();
+        if (is_log_enabled(DESTINY__TURN_TRACE))
+            _log(DESTINY__TURN_TRACE, "Destiny::Turn() - warp turnTic:%u, degRemain:%.3f, step:%.3f, heading:%.3f,%.3f,%.3f",
+                m_turnTic, EvE::Trig::Rad2Deg(m_radians), EvE::Trig::Rad2Deg(turnAngle),
+                m_shipHeading.x, m_shipHeading.y, m_shipHeading.z);
+        return;
+    }
 
     // need to check turnFraction vs m_timeFraction to hold speed when turning.
     /*  class          agility
