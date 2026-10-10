@@ -29,6 +29,8 @@
 #include "utils/utils_hex.h"
 #include "threading/Mutex.h"
 
+#include <chrono>
+
 Mutex mLogSys;
 
 FILE *logsys_log_file(nullptr);
@@ -47,6 +49,22 @@ static LogTypeStatus real_log_type_info[NUMBER_OF_LOG_TYPES+1] ={
 };
 
 const LogTypeStatus *log_type_info = real_log_type_info;
+
+void log_format_timestamp(char* buffer, size_t size) {
+    const auto now = std::chrono::system_clock::now();
+    const auto whole_second = std::chrono::floor<std::chrono::seconds>(now);
+    const time_t seconds = std::chrono::system_clock::to_time_t(whole_second);
+    const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(now - whole_second).count();
+
+    tm local_time;
+    if (localtime_r(&seconds, &local_time) == nullptr) {
+        snprintf(buffer, size, "??:??:??.%06lld", static_cast<long long>(micros));
+        return;
+    }
+
+    snprintf(buffer, size, "%02d:%02d:%02d.%06lld",
+             local_time.tm_hour, local_time.tm_min, local_time.tm_sec, static_cast<long long>(micros));
+}
 
 void log_hex(LogType type, const void *data, unsigned long length, unsigned char padding) {
     char buffer[1030];
@@ -83,52 +101,40 @@ void log_messageVA(LogType type, const char *fmt, va_list args) {
 
 extern void log_messageVA( LogType type, uint32 iden, const char *fmt, va_list args )
 {
-    /* allocate enough room for a med message  (changed from 4k to 1k) */
-    size_t log_msg_size = 0x400;
-    size_t log_msg_index = 0;
-    char* log_msg = (char*)malloc(log_msg_size);
+    char timestamp[16];
+    log_format_timestamp(timestamp, sizeof(timestamp));
 
-    /* handle the time part.. cross platform */
-    tm t;
-    time_t tTime;
-    time(&tTime);
-    localtime_r( &tTime, &t );
-    int va_size = snprintf(&log_msg[log_msg_index], log_msg_size, "%02u:%02u:%02u [%s] ", t.tm_hour, t.tm_min, t.tm_sec, log_type_info[type].display_name );
+    va_list args_copy;
+    va_copy(args_copy, args);
+    const int message_size = vsnprintf(nullptr, 0, fmt, args_copy);
+    va_end(args_copy);
+    if (message_size < 0)
+        return;
 
-    /* store the resulting size */
-    log_msg_size-=va_size;
-    log_msg_index+=va_size;
+    std::vector<char> message(static_cast<size_t>(message_size) + 1);
+    vsnprintf(message.data(), message.size(), fmt, args);
 
-    /* add the required spaces */
-    for (uint32 i = 0; i < iden; i++)
-        log_msg[log_msg_index++] = ' ';
-
-    /* make sure the resulting size is corrected */
-    log_msg_size-=iden;
-
-    /* put in the rest of the va stuff */
-    va_size = vsnprintf(&log_msg[log_msg_index], log_msg_size, fmt, args);
-    log_msg_index+=va_size;
-
-    /* make sure that there is a new line at the end */
-    log_msg[log_msg_index++] = '\n';
-    log_msg[log_msg_index++] = '\0';
+    std::string log_msg = timestamp;
+    log_msg += " [";
+    log_msg += log_type_info[type].display_name;
+    log_msg += "] ";
+    log_msg.append(iden, ' ');
+    log_msg.append(message.data(), static_cast<size_t>(message_size));
+    log_msg += '\n';
 
     MutexLock lock(mLogSys);
 
-    fputs(log_msg, stdout);
+    fputs(log_msg.c_str(), stdout);
 
     //print into the logfile (if any)
     if (logsys_log_file != nullptr) {
         //fprintf(logsys_log_file, "%s\n", message.c_str());
-        fputs(log_msg, logsys_log_file);
+        fputs(log_msg.c_str(), logsys_log_file);
         //keep the logfile updated
         fflush(logsys_log_file);
     }
 
     lock.Unlock();
-
-    free(log_msg);
 }
 
 void log_enable( LogType t )

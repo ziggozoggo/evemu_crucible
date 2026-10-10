@@ -272,13 +272,9 @@ void NewLog::PrintTime()
 {
     MutexLock l( mMutex );
 
-    // this will be replaced my a timing thread somehow
-    SetTime( time( NULL ) );
-
-    tm t;
-    localtime_r( &mTime, &t );
-
-    Print( "%02u:%02u:%02u", t.tm_hour, t.tm_min, t.tm_sec );
+    char timestamp[16];
+    log_format_timestamp(timestamp, sizeof(timestamp));
+    Print("%s", timestamp);
 }
 
 void NewLog::Print( const char* fmt, ... )

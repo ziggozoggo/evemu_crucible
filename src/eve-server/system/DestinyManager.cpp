@@ -67,6 +67,9 @@
 
 namespace {
     constexpr double DIRECTION_EPSILON = 1e-12;
+    // Empirical fit to the 2026-10-09 Impairor client warp-alignment samples;
+    // not yet measured for other ship classes. Keep ordinary steering unchanged.
+    constexpr double WARP_TURN_AGILITY_FACTOR = 0.655;
 
     bool NormalizeDirection(GVector& direction) {
         const double length = std::hypot(direction.x, direction.y, direction.z);
@@ -1061,6 +1064,30 @@ void DestinyManager::Turn() {
         if (m_turnFraction < m_timeFraction)
             UpdateVelocity(true);
 
+    if ((m_ballMode == Destiny::Ball::Mode::WARP) and (m_warpState == nullptr)) {
+        // Approximate the observed warp turn by exponentially reducing the
+        // remaining angle. The ordinary normalized vector lerp below takes
+        // 17 ticks from 136 degrees here; the client takes about 9. A spherical
+        // step avoids the old singularity at 100 degrees.
+        const double timeConstant = std::max(0.001, m_shipAgility * WARP_TURN_AGILITY_FACTOR);
+        const double turnAngle = m_radians * (1.0 - std::exp(-1.0 / timeConstant));
+        GVector perpendicular = m_targetHeading - (m_shipHeading * std::cos(m_radians));
+        if (!NormalizeDirection(perpendicular)) {
+            // Opposite headings have no unique great circle. Pick a stable
+            // perpendicular so a 180-degree warp command can still turn.
+            perpendicular = GVector(-m_shipHeading.y, m_shipHeading.x, 0.0);
+            if (!NormalizeDirection(perpendicular))
+                perpendicular = GVector(1.0, 0.0, 0.0);
+        }
+        m_shipHeading = m_shipHeading * std::cos(turnAngle) + perpendicular * std::sin(turnAngle);
+        m_shipHeading.normalize();
+        if (is_log_enabled(DESTINY__TURN_TRACE))
+            _log(DESTINY__TURN_TRACE, "Destiny::Turn() - warp turnTic:%u, degRemain:%.3f, step:%.3f, heading:%.3f,%.3f,%.3f",
+                m_turnTic, EvE::Trig::Rad2Deg(m_radians), EvE::Trig::Rad2Deg(turnAngle),
+                m_shipHeading.x, m_shipHeading.y, m_shipHeading.z);
+        return;
+    }
+
     // need to check turnFraction vs m_timeFraction to hold speed when turning.
     /*  class          agility
      * Capsule          .06
@@ -1672,11 +1699,20 @@ void DestinyManager::WarpUpdate(double currentShipSpeed) {
     SetPosition(m_targetPoint - (m_warpState->warp_vector * m_targetDistance));
 
     bool inTargetBubble = m_targBubble->InBubble(m_position, true);
-    SystemBubble* destinationBubble = m_targBubble;
-    if (!inTargetBubble)
-        destinationBubble = sBubbleMgr.GetBubble(mySE->SystemMgr(), m_position);
-
     SystemBubble* currentBubble = mySE->SysBubble();
+    SystemBubble* destinationBubble = m_targBubble;
+    if (!inTargetBubble) {
+        // A warp tick can land just outside the destination grid. Creating a
+        // temporary bubble there may overlap the destination (and split ships
+        // only a few kilometres apart between different grids). Keep the ship
+        // in its current bubble until it actually enters the destination.
+        if (currentBubble == nullptr or
+            m_targBubble->GetCenter().distance(m_position) >= BUBBLE_RADIUS_METERS * 2)
+            destinationBubble = sBubbleMgr.GetBubble(mySE->SystemMgr(), m_position);
+        else
+            destinationBubble = currentBubble;
+    }
+
     if (currentBubble != destinationBubble) {
         if (currentBubble != nullptr)
             currentBubble->Remove(mySE);
@@ -1744,9 +1780,23 @@ void DestinyManager::WarpStop(double currentShipSpeed) {
     CmdStop stop;
         stop.entityID = mySE->GetID();
     updates.push_back(stop.Encode());
-    // Stop client movement without replacing its last non-zero velocity vector,
+    // Stop the pilot without replacing its last non-zero velocity vector,
     // which the client retains as the ship's visual heading.
     SendDestinyUpdate(updates);
+
+    // Diagnostic: test whether remote clients keep moving this ship after Stop.
+    // Do not reset the pilot's own velocity vector (and visual heading).
+    if (mySE->IsShipSE() and (mySE->SysBubble() != nullptr)
+    and mySE->SystemMgr()->IsLoaded()) {
+        SetBallVelocity velocity;
+            velocity.entityID = mySE->GetID();
+            velocity.x = 0.0;
+            velocity.y = 0.0;
+            velocity.z = 0.0;
+        PyTuple* up = velocity.Encode();
+        mySE->SysBubble()->BubblecastDestinyUpdateExclusive(&up, "warp exit velocity", mySE);
+        PySafeDecRef(up);
+    }
 }
 
 void DestinyManager::EntityRemoved(SystemEntity *pSE) {

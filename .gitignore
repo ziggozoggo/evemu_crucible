@@ -7,6 +7,7 @@ AGENTS.md
 
 # User-specific dirs
 issues
+.trace
 
 # Windows image file caches
 Thumbs.db

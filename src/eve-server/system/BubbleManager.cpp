@@ -268,17 +268,59 @@ SystemBubble* BubbleManager::GetBubble(SystemManager* sysMgr, const GPoint& pos)
 }
 
 SystemBubble* BubbleManager::MakeBubble(SystemManager* sysMgr, GPoint pos) {
-    // determine if new center (pos) is within 2x radius of another bubble center. (overlap)
+    // A candidate must contain the requested position and not overlap any
+    // existing bubble. Shifting away from just the first overlap can move the
+    // new center straight into a second bubble.
+    const GPoint requestedPos(pos);
     auto range = m_sysBubbleMap.equal_range(sysMgr->GetID());
-    for ( auto itr = range.first; itr != range.second; ++itr )
+    bool overlaps = false;
+    for (auto itr = range.first; itr != range.second; ++itr) {
         if (itr->second->IsOverlap(pos)) {
-            GVector dir(itr->second->GetCenter(), pos);
-            dir.normalize();
-            _log(DESTINY__BUBBLE_DEBUG, "BubbleManager::MakeBubble()::IsOverlap() - dir: %.3f,%.3f,%.3f", dir.x, dir.y, dir.z);
-            // move pos away from center
-            pos = itr->second->GetCenter() + (dir * (BUBBLE_RADIUS_METERS * 2));
+            overlaps = true;
             break;
         }
+    }
+
+    if (overlaps) {
+        bool found = false;
+        double bestDistance = BUBBLE_RADIUS_METERS;
+        for (auto itr = range.first; itr != range.second; ++itr) {
+            if (!itr->second->IsOverlap(requestedPos))
+                continue;
+
+            const GPoint center(itr->second->GetCenter());
+            GVector dir(center, requestedPos);
+            if (dir.isZero())
+                continue;
+            dir.normalize();
+            const GPoint candidate(center + (dir * (BUBBLE_RADIUS_METERS * 2 + 10)));
+            const double distance = requestedPos.distance(candidate);
+            if (distance >= bestDistance)
+                continue;
+
+            bool clear = true;
+            for (auto other = range.first; other != range.second; ++other) {
+                if (other->second->IsOverlap(candidate)) {
+                    clear = false;
+                    break;
+                }
+            }
+            if (clear) {
+                pos = candidate;
+                bestDistance = distance;
+                found = true;
+            }
+        }
+
+        if (!found) {
+            // There may be no room for another disjoint bubble while keeping
+            // the requested position inside it. Preserve the requested point
+            // rather than placing an entity outside its own bubble.
+            pos = requestedPos;
+            _log(DESTINY__ERROR, "BubbleManager::MakeBubble() - no non-overlapping bubble fits around %.2f,%.2f,%.2f in system %u.",
+                pos.x, pos.y, pos.z, sysMgr->GetID());
+        }
+    }
 
     SystemBubble* pBubble = new SystemBubble(sysMgr, pos, BUBBLE_RADIUS_METERS);
     if (pBubble != nullptr) {
