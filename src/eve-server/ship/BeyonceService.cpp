@@ -28,6 +28,7 @@
 
 #include "Client.h"
 #include "StaticDataMgr.h"
+#include "fleet/FleetService.h"
 #include "cache/ObjCacheService.h"
 #include "planet/PlanetDB.h"
 #include "system/SystemDB.h"
@@ -571,11 +572,53 @@ PyResult BeyonceBound::CmdWarpToStuff(PyCallArgs &call, PyString* type, PyRep* i
         return PyStatic.NewNone();
     }
 
+    int8 fleetRole = 0;
+    if (fleet) {
+        fleetRole = call.client->GetFleetRole();
+        if (!call.client->InFleet() ||
+            (fleetRole != Fleet::Role::FleetLeader &&
+             fleetRole != Fleet::Role::WingLeader &&
+             fleetRole != Fleet::Role::SquadLeader)) {
+            call.client->SendErrorMsg("You cannot initiate a fleet warp.");
+            return PyStatic.NewNone();
+        }
+    }
+
     call.client->SetInvul(false);
     call.client->SetUndock(false);
 
+    const int32 warpDistance = distance;
     distance += (call.client->GetShipSE()->GetRadius() * 2); // add ship diameter to distance
     pDestiny->WarpTo(warpToPoint, distance);
+
+    if (fleet) {
+        const uint32 fleetID = call.client->GetFleetID();
+        for (Client* member : sFltSvc.GetFleetClients(fleetID)) {
+            if (member == nullptr || member == call.client ||
+                member->GetFleetID() != fleetID || !member->IsInSpace() ||
+                member->SystemMgr() != pSystem || member->GetShipSE() == nullptr ||
+                !member->GetShip())
+                continue;
+
+            if (fleetRole == Fleet::Role::WingLeader && member->GetWingID() != call.client->GetWingID())
+                continue;
+            if (fleetRole == Fleet::Role::SquadLeader &&
+                (member->GetWingID() != call.client->GetWingID() ||
+                 member->GetSquadID() != call.client->GetSquadID()))
+                continue;
+
+            DestinyManager* memberDestiny = member->GetShipSE()->DestinyMgr();
+            if (memberDestiny == nullptr || memberDestiny->IsWarping() ||
+                memberDestiny->IsFrozen() || memberDestiny->AbortIfLoginWarping(true) ||
+                member->GetShip()->GetAttribute(AttrWarpScrambleStatus) > 0)
+                continue;
+
+            member->SetInvul(false);
+            member->SetUndock(false);
+            const int32 memberDistance = warpDistance + (member->GetShipSE()->GetRadius() * 2);
+            memberDestiny->WarpTo(warpToPoint, memberDistance);
+        }
+    }
 
     return PyStatic.NewNone();
 }

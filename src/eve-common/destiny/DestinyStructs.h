@@ -158,8 +158,10 @@ struct WARP_Struct {
     int32 effectStamp;   //statestamp of when warp started
     int64 followRange;   //unknown   -4616189618054758400 when warp is initiated.  calculation unknown for other values (used during warp)
     int64 followID;      //unknown   4669471951536783360 when warp is initiated or ship enters new bubble (AddBalls), 0 otherwise
-    int32 speed;
+    int64 speed;         // client consumes 8 bytes here; 4 shifts the next ball in AddBalls
 };
+
+static_assert(sizeof(WARP_Struct) == 53, "WARP ball wire format must match the client");
 
 struct ORBIT_Struct {
     uint8  formationID;
