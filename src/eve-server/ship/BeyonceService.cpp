@@ -28,6 +28,7 @@
 
 #include "Client.h"
 #include "StaticDataMgr.h"
+#include "fleet/FleetService.h"
 #include "cache/ObjCacheService.h"
 #include "planet/PlanetDB.h"
 #include "system/SystemDB.h"
@@ -387,6 +388,7 @@ PyResult BeyonceBound::CmdWarpToStuff(PyCallArgs &call, PyString* type, PyRep* i
 
     GPoint warpToPoint(NULL_ORIGIN);
     SystemEntity* pSE(nullptr);
+    Client* warpTarget(nullptr);
     double radius(0);
     uint32 toID(0);
     std::string stringArg = "";
@@ -452,11 +454,29 @@ PyResult BeyonceBound::CmdWarpToStuff(PyCallArgs &call, PyString* type, PyRep* i
         call.client->SendErrorMsg("WarpToTutorial is not implemented at this time.");
         return PyStatic.NewNone();
     } else if (type->content() == "char") {
-    //  fleet warping
-    // [warptomember] char, charid, minrange
-    // [warpfleettomember] char, charid, minrange, fleet=1
-        call.client->SendErrorMsg("WarpToChar is not implemented at this time.");
-        return PyStatic.NewNone();
+        // [warptomember] char, charid, minrange
+        // [warpfleettomember] char, charid, minrange, fleet=1
+        if ((!id->IsInt() && !id->IsLong()) || !call.client->InFleet() ||
+            toID == call.client->GetCharacterID()) {
+            call.client->SendErrorMsg("You can only warp to another member of your fleet.");
+            return PyStatic.NewNone();
+        }
+
+        warpTarget = sEntityList.FindClientByCharID(toID);
+        if (warpTarget == nullptr || !warpTarget->InFleet() ||
+            warpTarget->GetFleetID() != call.client->GetFleetID()) {
+            call.client->SendErrorMsg("You can only warp to another member of your fleet.");
+            return PyStatic.NewNone();
+        }
+
+        ShipSE* targetShip = warpTarget->GetShipSE();
+        if (!warpTarget->IsInSpace() || warpTarget->SystemMgr() != pSystem ||
+            !warpTarget->GetShip() || targetShip == nullptr ||
+            pSystem->GetSE(targetShip->GetID()) != targetShip) {
+            call.client->SendErrorMsg("Fleet member is not in space in your solar system.");
+            return PyStatic.NewNone();
+        }
+        pSE = targetShip;
     } else {
         sLog.Error( "BeyonceService::Handle_WarpToStuff()", "Unexpected type value: '%s'.", type->content().c_str() );
         return PyStatic.NewNone();
@@ -571,11 +591,70 @@ PyResult BeyonceBound::CmdWarpToStuff(PyCallArgs &call, PyString* type, PyRep* i
         return PyStatic.NewNone();
     }
 
+    int8 fleetRole = 0;
+    if (fleet) {
+        fleetRole = call.client->GetFleetRole();
+        if (!call.client->InFleet() ||
+            (fleetRole != Fleet::Role::FleetLeader &&
+             fleetRole != Fleet::Role::WingLeader &&
+             fleetRole != Fleet::Role::SquadLeader)) {
+            call.client->SendErrorMsg("You cannot initiate a fleet warp.");
+            return PyStatic.NewNone();
+        }
+        if (warpTarget != nullptr &&
+            ((fleetRole == Fleet::Role::WingLeader && warpTarget->GetWingID() != call.client->GetWingID()) ||
+             (fleetRole == Fleet::Role::SquadLeader &&
+              (warpTarget->GetWingID() != call.client->GetWingID() ||
+               warpTarget->GetSquadID() != call.client->GetSquadID())))) {
+            call.client->SendErrorMsg("You cannot initiate a fleet warp to this member.");
+            return PyStatic.NewNone();
+        }
+        // Do not send the fleet if the initiator cannot make this warp.
+        if (warpTarget != nullptr) {
+            const int32 pilotDistance = distance + (call.client->GetShipSE()->GetRadius() * 2);
+            GVector toTarget(call.client->GetShipSE()->GetPosition(), warpToPoint);
+            if (toTarget.length() - pilotDistance < minWarpDistance) {
+                call.client->SendErrorMsg("That is too close for your Warp Drive.");
+                return PyStatic.NewNone();
+            }
+        }
+    }
+
     call.client->SetInvul(false);
     call.client->SetUndock(false);
 
+    const int32 warpDistance = distance;
     distance += (call.client->GetShipSE()->GetRadius() * 2); // add ship diameter to distance
     pDestiny->WarpTo(warpToPoint, distance);
+
+    if (fleet) {
+        const uint32 fleetID = call.client->GetFleetID();
+        for (Client* member : sFltSvc.GetFleetClients(fleetID)) {
+            if (member == nullptr || member == call.client ||
+                member->GetFleetID() != fleetID || !member->IsInSpace() ||
+                member->SystemMgr() != pSystem || member->GetShipSE() == nullptr ||
+                !member->GetShip())
+                continue;
+
+            if (fleetRole == Fleet::Role::WingLeader && member->GetWingID() != call.client->GetWingID())
+                continue;
+            if (fleetRole == Fleet::Role::SquadLeader &&
+                (member->GetWingID() != call.client->GetWingID() ||
+                 member->GetSquadID() != call.client->GetSquadID()))
+                continue;
+
+            DestinyManager* memberDestiny = member->GetShipSE()->DestinyMgr();
+            if (memberDestiny == nullptr || memberDestiny->IsWarping() ||
+                memberDestiny->IsFrozen() || memberDestiny->AbortIfLoginWarping(true) ||
+                member->GetShip()->GetAttribute(AttrWarpScrambleStatus) > 0)
+                continue;
+
+            member->SetInvul(false);
+            member->SetUndock(false);
+            const int32 memberDistance = warpDistance + (member->GetShipSE()->GetRadius() * 2);
+            memberDestiny->WarpTo(warpToPoint, memberDistance);
+        }
+    }
 
     return PyStatic.NewNone();
 }
