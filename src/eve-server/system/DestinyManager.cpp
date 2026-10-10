@@ -1780,9 +1780,23 @@ void DestinyManager::WarpStop(double currentShipSpeed) {
     CmdStop stop;
         stop.entityID = mySE->GetID();
     updates.push_back(stop.Encode());
-    // Stop client movement without replacing its last non-zero velocity vector,
+    // Stop the pilot without replacing its last non-zero velocity vector,
     // which the client retains as the ship's visual heading.
     SendDestinyUpdate(updates);
+
+    // Diagnostic: test whether remote clients keep moving this ship after Stop.
+    // Do not reset the pilot's own velocity vector (and visual heading).
+    if (mySE->IsShipSE() and (mySE->SysBubble() != nullptr)
+    and mySE->SystemMgr()->IsLoaded()) {
+        SetBallVelocity velocity;
+            velocity.entityID = mySE->GetID();
+            velocity.x = 0.0;
+            velocity.y = 0.0;
+            velocity.z = 0.0;
+        PyTuple* up = velocity.Encode();
+        mySE->SysBubble()->BubblecastDestinyUpdateExclusive(&up, "warp exit velocity", mySE);
+        PySafeDecRef(up);
+    }
 }
 
 void DestinyManager::EntityRemoved(SystemEntity *pSE) {
